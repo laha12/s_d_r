@@ -37,8 +37,10 @@
 #include "ns3/topology-satellite-network.h"
 #include "ns3/tcp-optimizer.h"
 #include "ns3/arbiter-single-forward-helper.h"
+#include "../../contrib/satellite-network/model/arbiter-ucb-distributed-routing.h"
 #include "ns3/ipv4-arbiter-routing-helper.h"
 #include "ns3/gsl-if-bandwidth-helper.h"
+#include "ns3/exp-util.h"
 
 using namespace ns3;
 
@@ -67,10 +69,52 @@ int main(int argc, char *argv[]) {
     // Optimize TCP
     TcpOptimizer::OptimizeBasic(basicSimulation);
 
-    // Read topology, and install routing arbiters
+    // Read topology
     Ptr<TopologySatelliteNetwork> topology = CreateObject<TopologySatelliteNetwork>(basicSimulation, Ipv4ArbiterRoutingHelper());
-    ArbiterSingleForwardHelper arbiterHelper(basicSimulation, topology->GetNodes());
-    GslIfBandwidthHelper gslIfBandwidthHelper(basicSimulation, topology->GetNodes());
+
+    // Install routing arbiters
+    std::string routing_mode = basicSimulation->GetConfigParamOrDefault("satellite_network_routing", "single_forward");
+    if (routing_mode == "ucb_distributed") {
+
+        uint32_t max_hop_count = (uint32_t) parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("ucb_max_hop_count", "30")
+        );
+        double slot_duration_s = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_slot_duration_s", "1.0")
+        );
+        double epsilon1 = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_epsilon1", "1e-9")
+        );
+        double epsilon2 = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_epsilon2", "1e-9")
+        );
+
+        std::vector<double> reward_weights;
+        std::string reward_weights_str = basicSimulation->GetConfigParamOrDefault(
+            "ucb_reward_weights", "list(0.25,0.25,0.25,0.25)"
+        );
+        std::vector<std::string> w_str_list = parse_list_string(reward_weights_str);
+        for (std::string &s : w_str_list) {
+            reward_weights.push_back(parse_double(s));
+        }
+        // 每个节点绑定一个ucb
+        for (size_t i = 0; i < topology->GetNodes().GetN(); i++) {
+            Ptr<ArbiterUcbDistributedRouting> arbiter = CreateObject<ArbiterUcbDistributedRouting>(
+                topology->GetNodes().Get(i),
+                topology->GetNodes(),
+                max_hop_count,
+                slot_duration_s,
+                reward_weights,
+                epsilon1,
+                epsilon2
+            );
+            topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
+        }
+
+    } else {
+        ArbiterSingleForwardHelper arbiterHelper(basicSimulation, topology->GetNodes());
+        GslIfBandwidthHelper gslIfBandwidthHelper(basicSimulation, topology->GetNodes());
+    }
 
     // Schedule flows
     TcpFlowScheduler tcpFlowScheduler(basicSimulation, topology); // Requires enable_tcp_flow_scheduler=true
