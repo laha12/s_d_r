@@ -1,3 +1,5 @@
 .idea
 *.pyc
 dev_testing/
+ns3-sat-sim/simulator/test_data/
+paper/ns3_experiments_ucb_25x25/
