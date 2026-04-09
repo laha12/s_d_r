@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <limits>
 #include <sstream>
+#include <iostream>
+#include <fstream>
+#include <cstdlib>
 #include "ns3/data-rate.h"
 #include "ns3/channel.h"
 #include "ns3/gsl-net-device.h"
@@ -14,6 +17,58 @@
 #include "ns3/simulator.h"
 
 namespace ns3 {
+
+namespace {
+const bool kUcbRouteDebug = true;
+const uint64_t kUcbRouteDebugMaxLines = 100000;
+const size_t kUcbRouteDebugMaxArmsToPrint = 32;
+uint64_t g_ucb_route_debug_line_count = 0;
+std::ofstream g_ucb_route_debug_file;
+bool g_ucb_route_debug_file_initialized = false;
+std::map<uint64_t, UcbPacketState> g_ucb_packet_state_by_uid;
+
+std::string VectorToString(const std::vector<uint32_t>& vec) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < vec.size(); i++) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << vec[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string ArmSummaryToString(const std::vector<uint32_t>& vec) {
+    if (vec.size() > kUcbRouteDebugMaxArmsToPrint) {
+        std::ostringstream oss;
+        oss << "[omitted,size=" << vec.size() << "]";
+        return oss.str();
+    }
+    return VectorToString(vec);
+}
+
+void DebugLog(const std::string& msg) {
+    if (!kUcbRouteDebug) {
+        return;
+    }
+    if (g_ucb_route_debug_line_count >= kUcbRouteDebugMaxLines) {
+        return;
+    }
+    if (!g_ucb_route_debug_file_initialized) {
+        const char* env_log_path = std::getenv("UCB_ROUTE_DEBUG_PATH");
+        std::string log_path = env_log_path ? std::string(env_log_path) : "ucb_distributed_routing_debug.txt";
+        g_ucb_route_debug_file.open(log_path, std::ios::out | std::ios::app);
+        g_ucb_route_debug_file_initialized = true;
+    }
+    if (g_ucb_route_debug_file.is_open()) {
+        g_ucb_route_debug_file << msg << std::endl;
+        g_ucb_route_debug_file.flush();
+        g_ucb_route_debug_line_count++;
+    }
+}
+}
 
 NS_LOG_COMPONENT_DEFINE("ArbiterUcbDistributedRouting");
 NS_OBJECT_ENSURE_REGISTERED(ArbiterUcbDistributedRouting);
@@ -76,12 +131,31 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
     double slotDurationS,
     std::vector<double> rewardWeights,
     double epsilon1,
-    double epsilon2
+    double epsilon2,
+    double maxGslLengthM,
+    double maxIslLengthM,
+    double randomSelectProb,
+    double dstArrivalReward
 ) : ArbiterSatnet(this_Node, nodes) {
     m_node_id = this_Node->GetId();
     m_maxHopCount = maxHopCount;
     m_slotDurationS = slotDurationS;
     m_slotDurationNs = (uint64_t)(slotDurationS * 1e9);
+    m_numSatellites = 0;
+    for (uint32_t nodeId = 0; nodeId < m_nodes.GetN(); nodeId++) {
+        Ptr<Node> node = m_nodes.Get(nodeId);
+        bool hasIslDevice = false;
+        uint32_t nNodeDevices = node->GetNDevices();
+        for (uint32_t devId = 0; devId < nNodeDevices; devId++) {
+            if (DynamicCast<PointToPointLaserNetDevice>(node->GetDevice(devId)) != 0) {
+                hasIslDevice = true;
+                break;
+            }
+        }
+        if (hasIslDevice) {
+            m_numSatellites++;
+        }
+    }
     // 默认均分
     m_rewardWeights = std::vector<double>{0.25, 0.25, 0.25, 0.25};
     // 自定义奖励权重 截断处理
@@ -90,68 +164,151 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
     }
     m_epsilon1 = epsilon1;
     m_epsilon2 = epsilon2;
+    m_max_gsl_length_m = maxGslLengthM;
+    m_max_isl_length_m = maxIslLengthM;
+    m_random_select_prob = randomSelectProb;
+    m_dst_arrival_reward = dstArrivalReward;
+    NS_ABORT_MSG_IF(
+        m_random_select_prob < 0.0 || m_random_select_prob > 1.0,
+        "ucb_random_select_prob must be in [0, 1]"
+    );
+    m_randomVariable = CreateObject<UniformRandomVariable>();
     m_currentSlot = 0;
     m_totalForwardCount = 0;
+    m_totalDropCount = 0;
     m_lastSlotUpdateTimeNs = Simulator::Now().GetNanoSeconds();
     // 获取当前节点网络设备数目
     uint32_t nDevices = this_Node->GetNDevices();
     for (uint32_t i = 0; i < nDevices; i++) {
         Ptr<NetDevice> dev = this_Node->GetDevice(i);
-        // 类型转换 检查是否为ISL或GSL设备 失败为Null
+        // 识别GSL/ISl设备
         Ptr<PointToPointLaserNetDevice> islDev = DynamicCast<PointToPointLaserNetDevice>(dev);
         Ptr<GSLNetDevice> gslDev = DynamicCast<GSLNetDevice>(dev);
-        if (!islDev && !gslDev) continue;
-        // check网卡是否连接到通道
-        if (dev->GetChannel() == 0) continue;
-
+        if (!islDev && !gslDev) {
+            continue;
+        }
         Ptr<Channel> channel = dev->GetChannel();
-        Ptr<NetDevice> dev0 = channel->GetDevice(0);
-        Ptr<NetDevice> dev1 = channel->GetDevice(1);
-        // 判断邻居
-        Ptr<NetDevice> peerDev = dev0->GetNode()->GetId() == (uint32_t)m_node_id ? dev1 : dev0;
-        uint32_t neighborNodeId = peerDev->GetNode()->GetId();
+        if (channel == 0) {
+            continue;
+        }
 
-        LinkState linkState;
-        linkState.neighborNodeId = neighborNodeId;
-        linkState.outInterfaceId = dev->GetIfIndex();
-        linkState.nextHopInInterfaceId = peerDev->GetIfIndex();
         DataRateValue dataRateValue;
         if (islDev) {
             islDev->GetAttribute("DataRate", dataRateValue);
-            linkState.transmissionRateBps = (double) dataRateValue.Get().GetBitRate();
         } else {
             gslDev->GetAttribute("DataRate", dataRateValue);
-            linkState.transmissionRateBps = (double) dataRateValue.Get().GetBitRate();
         }
-        linkState.maxCapacityBit = linkState.transmissionRateBps * slotDurationS;
-        linkState.usedCapacityBit = 0.0;
-        linkState.queueLength = 0;
-        linkState.isIsl = (islDev != 0);
-        linkState.isGsl = (gslDev != 0);
-        linkState.neighborIsGroundStation = IsGroundStationNode(neighborNodeId);
-        // 获取当前节点和邻居节点的位置信息
+        double transmissionRateBps = static_cast<double>(dataRateValue.Get().GetBitRate());
         Ptr<MobilityModel> mobThis = this_Node->GetObject<MobilityModel>();
-        Ptr<MobilityModel> mobNeighbor = peerDev->GetNode()->GetObject<MobilityModel>();
-        if (mobThis != 0 && mobNeighbor != 0) {
-            double distanceM = mobThis->GetDistanceFrom(mobNeighbor);
-            linkState.propagationDelayMs = (distanceM / 299792458.0) * 1000.0;
-        } else {
-            linkState.propagationDelayMs = 0.0;
+
+        if (islDev) {
+            // 获取ISL设备的接收节点
+            Ptr<Node> destinationNode = islDev->GetDestinationNode();
+            if (destinationNode == 0) {
+                continue;
+            }
+            uint32_t neighborNodeId = destinationNode->GetId();
+            Ptr<NetDevice> peerDev;
+            uint32_t destinationDeviceCount = destinationNode->GetNDevices();
+            for (uint32_t k = 0; k < destinationDeviceCount; k++) {
+                Ptr<NetDevice> candidate = destinationNode->GetDevice(k);
+                if (candidate->GetChannel() == channel) {
+                    peerDev = candidate;
+                    break;
+                }
+            }
+            if (peerDev == 0) {
+                continue;
+            }
+            LinkState linkState;
+            linkState.neighborNodeId = neighborNodeId;
+            linkState.outInterfaceId = dev->GetIfIndex();
+            linkState.nextHopInInterfaceId = peerDev->GetIfIndex();
+            linkState.transmissionRateBps = transmissionRateBps;
+            linkState.maxCapacityBit = transmissionRateBps * slotDurationS;
+            linkState.usedCapacityBit = 0.0;
+            linkState.queueLength = 0;
+            linkState.isIsl = true;
+            linkState.isGsl = false;
+            linkState.isAvailable = true;
+            linkState.neighborIsGroundStation = IsGroundStationNode(neighborNodeId);
+            Ptr<MobilityModel> mobNeighbor = destinationNode->GetObject<MobilityModel>();
+            double distanceM = 0.0;
+            if (mobThis != 0 && mobNeighbor != 0) {
+                distanceM = mobThis->GetDistanceFrom(mobNeighbor);
+                linkState.propagationDelayMs = (distanceM / 299792458.0) * 1000.0;
+            } else {
+                linkState.propagationDelayMs = 0.0;
+            }
+            m_linkStateMap[neighborNodeId] = linkState;
+            if (m_ucbStateMap.find(neighborNodeId) == m_ucbStateMap.end()) {
+                double initialReward = 1.0 / (1.0 + (distanceM / 1000000.0));
+                m_ucbStateMap[neighborNodeId] = {initialReward, 0};
+            }
+            continue;
         }
 
-        m_linkStateMap[neighborNodeId] = linkState;
-        // 若该邻居未初始化过ucb 则初始化
-        if (m_ucbStateMap.find(neighborNodeId) == m_ucbStateMap.end()) {
-            m_ucbStateMap[neighborNodeId] = {1.0, 0};
+        uint32_t nChannelDevices = channel->GetNDevices();
+        for (uint32_t j = 0; j < nChannelDevices; j++) {
+            Ptr<NetDevice> peerDev = channel->GetDevice(j);
+            if (peerDev == dev) {
+                continue;
+            }
+            uint32_t neighborNodeId = peerDev->GetNode()->GetId();
+            LinkState linkState;
+            linkState.neighborNodeId = neighborNodeId;
+            linkState.outInterfaceId = dev->GetIfIndex();
+            linkState.nextHopInInterfaceId = peerDev->GetIfIndex();
+            linkState.transmissionRateBps = transmissionRateBps;
+            linkState.maxCapacityBit = transmissionRateBps * slotDurationS;
+            linkState.usedCapacityBit = 0.0;
+            linkState.queueLength = 0;
+            linkState.isIsl = false;
+            linkState.isGsl = true;
+            linkState.isAvailable = true;
+            linkState.neighborIsGroundStation = IsGroundStationNode(neighborNodeId);
+            Ptr<MobilityModel> mobNeighbor = peerDev->GetNode()->GetObject<MobilityModel>();
+            double distanceM = 0.0;
+            if (mobThis != 0 && mobNeighbor != 0) {
+                distanceM = mobThis->GetDistanceFrom(mobNeighbor);
+                linkState.propagationDelayMs = (distanceM / 299792458.0) * 1000.0;
+            } else {
+                linkState.propagationDelayMs = 0.0;
+            }
+            auto existingLinkIt = m_linkStateMap.find(neighborNodeId);
+            if (existingLinkIt != m_linkStateMap.end() && existingLinkIt->second.isIsl) {
+                continue;
+            }
+            m_linkStateMap[neighborNodeId] = linkState;
+            if (m_ucbStateMap.find(neighborNodeId) == m_ucbStateMap.end()) {
+                double initialReward = 1.0 / (1.0 + (distanceM / 1000000.0));
+                m_ucbStateMap[neighborNodeId] = {initialReward, 0};
+            }
         }
     }
+    RefreshLinkAvailability();
     // 定时执行重置链路状态
     Simulator::Schedule(Seconds(m_slotDurationS), &ArbiterUcbDistributedRouting::SlotResetHandler, this);
 }
 
 ArbiterUcbDistributedRouting::~ArbiterUcbDistributedRouting() {}
 
-void ArbiterUcbDistributedRouting::SlotResetHandler() {
+UcbPacketState ArbiterUcbDistributedRouting::InitPacketState(int32_t sourceNodeId, int32_t targetNodeId) const
+{
+    UcbPacketState state;
+    state.srcNodeId = static_cast<uint32_t>(sourceNodeId);
+    state.dstNodeId = static_cast<uint32_t>(targetNodeId);
+    state.hopCount = 0;
+    state.pathHistory.clear();
+    state.pathHistory.push_back(static_cast<uint32_t>(sourceNodeId));
+    if (static_cast<uint32_t>(m_node_id) != static_cast<uint32_t>(sourceNodeId)) {
+        state.pathHistory.push_back(static_cast<uint32_t>(m_node_id));
+    }
+    return state;
+}
+
+void ArbiterUcbDistributedRouting::SlotResetHandler()
+{
     m_currentSlot++;
     m_lastSlotUpdateTimeNs = Simulator::Now().GetNanoSeconds();
     ResetSlotDynamicState();
@@ -159,50 +316,105 @@ void ArbiterUcbDistributedRouting::SlotResetHandler() {
 }
 
 void ArbiterUcbDistributedRouting::ResetSlotDynamicState() {
+    const double packetSizeBit = 1500.0 * 8.0;
+    // TODO: 考虑将链路已使用容量调整一下 是否可以调整为非0
     for (auto &pair : m_linkStateMap) {
-        pair.second.usedCapacityBit = 0.0;
+        LinkState &linkState = pair.second;
+        
+        uint32_t maxProcessablePackets = static_cast<uint32_t>(linkState.maxCapacityBit / packetSizeBit);
+        if (linkState.queueLength > maxProcessablePackets) {
+            linkState.queueLength -= maxProcessablePackets;
+        } else {
+            linkState.queueLength = 0;
+        }
+        linkState.usedCapacityBit = 0.0;
+    }
+    RefreshLinkAvailability();
+}
+
+void ArbiterUcbDistributedRouting::RefreshLinkAvailability()
+{
+    for (auto &pair : m_linkStateMap) {
+        LinkState &linkState = pair.second;
+        double distanceM = 0.0;
+        if (!TryGetCurrentDistanceM(linkState.neighborNodeId, distanceM)) {
+            linkState.propagationDelayMs = 0.0;
+            linkState.isAvailable = true;
+            continue;
+        }
+
+        linkState.propagationDelayMs = (distanceM / 299792458.0) * 1000.0;
+        if (linkState.isGsl) {
+            linkState.isAvailable = distanceM <= m_max_gsl_length_m;
+        } else if (linkState.isIsl) {
+            linkState.isAvailable = distanceM <= m_max_isl_length_m;
+        } else {
+            linkState.isAvailable = true;
+        }
     }
 }
 
 std::vector<uint32_t> ArbiterUcbDistributedRouting::GetValidArms(
     uint32_t targetNodeId,
-    const PacketState &packetState
+    const UcbPacketState &packetState
 ) const {
     bool currentIsGroundStation = IsGroundStationNode(m_node_id);
-    bool targetIsGroundStation = IsGroundStationNode(targetNodeId);
+    if (!IsGroundStationNode(targetNodeId)) {
+        return {};
+    }
+    auto targetLinkIt = m_linkStateMap.find(targetNodeId);
+    if (targetLinkIt != m_linkStateMap.end()) {
+        const LinkState &targetLink = targetLinkIt->second;
+        bool targetVisited = std::find(
+            packetState.pathHistory.begin(),
+            packetState.pathHistory.end(),
+            targetNodeId
+        ) != packetState.pathHistory.end();
+        bool allowDirectTarget = !targetVisited
+                                 && !currentIsGroundStation
+                                 && targetLink.isGsl
+                                 && targetLink.isAvailable;
+        if (allowDirectTarget) {
+            return {targetNodeId};
+        }
+    }
     std::vector<uint32_t> unvisitedNeighbors;
     for (const auto &pair : m_linkStateMap) {
         uint32_t neighborId = pair.first;
+        const LinkState &linkState = pair.second;
+
+        if (!linkState.isAvailable) {
+            continue;
+        }
+        
         bool isVisited = std::find(
             packetState.pathHistory.begin(),
             packetState.pathHistory.end(),
             neighborId
         ) != packetState.pathHistory.end();
-        if (!isVisited) {
-            unvisitedNeighbors.push_back(neighborId);
+
+        if (isVisited) {
+            continue;
         }
+
+        unvisitedNeighbors.push_back(neighborId);
     }
 
     std::vector<uint32_t> strictCandidates;
     for (uint32_t neighborId : unvisitedNeighbors) {
         const LinkState &linkState = m_linkStateMap.at(neighborId);
-        // 当前是地球站
-        if (currentIsGroundStation && linkState.isGsl) {
-            strictCandidates.push_back(neighborId);
-            continue;
-        }
-        if (!currentIsGroundStation && targetIsGroundStation) {
-            // 当前卫星 且 目标是卫星
+
+        if (currentIsGroundStation) {
+            if (linkState.isGsl && !linkState.neighborIsGroundStation) {
+                strictCandidates.push_back(neighborId);
+            }
+        } 
+        else {
             bool directToTargetGround = (neighborId == targetNodeId && linkState.isGsl);
             bool relayBySatellite = (!linkState.neighborIsGroundStation && linkState.isIsl);
             if (directToTargetGround || relayBySatellite) {
                 strictCandidates.push_back(neighborId);
             }
-            continue;
-        }
-        // 当前是卫星 且 目标是卫星
-        if (!currentIsGroundStation && !targetIsGroundStation && !linkState.neighborIsGroundStation && linkState.isIsl) {
-            strictCandidates.push_back(neighborId);
         }
     }
 
@@ -222,7 +434,7 @@ std::vector<uint32_t> ArbiterUcbDistributedRouting::GetValidArms(
         return fallbackNonGround;
     }
 
-    return unvisitedNeighbors;
+    return {};
 }
 
 double ArbiterUcbDistributedRouting::CalculateUcbWeight(uint32_t neighborId, uint32_t totalForwardCount) {
@@ -240,6 +452,10 @@ double ArbiterUcbDistributedRouting::CalculateReward(
     const std::vector<uint32_t> &candidateArms,
     bool transmitSuccess
 ) const {
+    if (neighborId == targetNodeId && transmitSuccess) {
+        return m_dst_arrival_reward;
+    }
+    
     const LinkState &linkState = m_linkStateMap.at(neighborId);
     double w1 = m_rewardWeights[0];
     double w2 = m_rewardWeights[1];
@@ -268,9 +484,8 @@ double ArbiterUcbDistributedRouting::CalculateReward(
         maxDist = std::max(maxDist, dist);
     }
 
-    double throughputReward = transmitSuccess
-        ? (linkState.maxCapacityBit - linkState.usedCapacityBit) / std::max(linkState.maxCapacityBit, m_epsilon2)
-        : 0.0;
+    double throughputReward = (linkState.maxCapacityBit - linkState.usedCapacityBit)
+        / std::max(linkState.maxCapacityBit, m_epsilon2);
     throughputReward = std::max(0.0, throughputReward);
 
     double queuingDelayMs = (linkState.queueLength * 1500.0 * 8.0) / std::max(linkState.transmissionRateBps, m_epsilon2) * 1000.0;
@@ -303,6 +518,21 @@ void ArbiterUcbDistributedRouting::UpdateLinkState(uint32_t neighborId, uint32_t
     linkState.queueLength++;
 }
 
+bool ArbiterUcbDistributedRouting::TryGetCurrentDistanceM(uint32_t neighborId, double &distanceM) const {
+    Ptr<Node> thisNode = m_nodes.Get(m_node_id);
+    Ptr<Node> neighborNode = m_nodes.Get(neighborId);
+    if (thisNode == 0 || neighborNode == 0) {
+        return false;
+    }
+    Ptr<MobilityModel> mobThis = thisNode->GetObject<MobilityModel>();
+    Ptr<MobilityModel> mobNeighbor = neighborNode->GetObject<MobilityModel>();
+    if (mobThis == 0 || mobNeighbor == 0) {
+        return false;
+    }
+    distanceM = mobThis->GetDistanceFrom(mobNeighbor);
+    return true;
+}
+
 double ArbiterUcbDistributedRouting::CalculateDistanceToDestination(uint32_t neighborId, uint32_t dstNodeId) const {
     Ptr<Node> neighborNode = m_nodes.Get(neighborId);
     Ptr<Node> dstNode = m_nodes.Get(dstNodeId);
@@ -316,13 +546,13 @@ double ArbiterUcbDistributedRouting::CalculateDistanceToDestination(uint32_t nei
 
 bool ArbiterUcbDistributedRouting::IsPacketDrop(
     uint32_t neighborId,
-    const PacketState &packetState,
+    const UcbPacketState &packetState,
     const Ipv4Header &ipHeader
 ) const {
     if (packetState.hopCount >= m_maxHopCount) {
         return true;
     }
-    if (ipHeader.GetTtl() <= 1) {
+    if (ipHeader.GetTtl() > 0 && ipHeader.GetTtl() <= 1) {
         return true;
     }
     const LinkState &linkState = m_linkStateMap.at(neighborId);
@@ -339,69 +569,183 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
     Ipv4Header const &ipHeader,
     bool isRequestForSourceIpSoNoNextHeader
 ) {
+    bool isDryRun = isRequestForSourceIpSoNoNextHeader;
+    bool allowLearning = !isDryRun && ipHeader.GetTtl() > 0;
     if (m_node_id == targetNodeId) {
+        if (allowLearning && pkt) {
+            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        }
         return std::make_tuple(-1, -1, -1);
     }
 
-    bool isDryRun = isRequestForSourceIpSoNoNextHeader;
-    PacketState packetState;
-    if (!isDryRun) {
+    uint64_t uid_for_log = pkt ? pkt->GetUid() : 0;
+    UcbPacketState packetState;
+    if (allowLearning) {
         uint64_t uid = pkt->GetUid();
-        auto it = m_packetStateByUid.find(uid);
-        // 新包
-        if (it == m_packetStateByUid.end()) {
-            packetState.srcNodeId = static_cast<uint32_t>(sourceNodeId);
-            packetState.dstNodeId = static_cast<uint32_t>(targetNodeId);
-            packetState.hopCount = 0;
-            packetState.pathHistory = {static_cast<uint32_t>(m_node_id)};
-            m_packetStateByUid[uid] = packetState;
+        auto it = g_ucb_packet_state_by_uid.find(uid);
+        if (it == g_ucb_packet_state_by_uid.end()) {
+            packetState = InitPacketState(sourceNodeId, targetNodeId);
+            g_ucb_packet_state_by_uid[uid] = packetState;
         } else {
-            packetState = it->second;
-            packetState.hopCount++;
-            packetState.pathHistory.push_back(static_cast<uint32_t>(m_node_id));
-            it->second = packetState;
+            UcbPacketState &globalState = it->second;
+            // 做一致性校验
+            bool stateMismatch =
+                globalState.srcNodeId != static_cast<uint32_t>(sourceNodeId) ||
+                globalState.dstNodeId != static_cast<uint32_t>(targetNodeId);
+            // 不一致则重新初始化
+            if (stateMismatch) {
+                packetState = InitPacketState(sourceNodeId, targetNodeId);
+                globalState = packetState;
+            }
+            else {
+                packetState.srcNodeId = globalState.srcNodeId;
+                packetState.dstNodeId = globalState.dstNodeId;
+                packetState.hopCount = globalState.hopCount;
+                packetState.pathHistory = globalState.pathHistory;
+                packetState.hopCount++;
+                if (packetState.pathHistory.empty() || packetState.pathHistory.back() != static_cast<uint32_t>(m_node_id)) {
+                    packetState.pathHistory.push_back(static_cast<uint32_t>(m_node_id));
+                }
+                globalState.hopCount = packetState.hopCount;
+                globalState.pathHistory = packetState.pathHistory;
+            }
         }
     } else {
-        packetState.srcNodeId = static_cast<uint32_t>(sourceNodeId);
-        packetState.dstNodeId = static_cast<uint32_t>(targetNodeId);
-        packetState.hopCount = 0;
-        packetState.pathHistory = {static_cast<uint32_t>(m_node_id)};
+        packetState = InitPacketState(sourceNodeId, targetNodeId);
     }
 
     std::vector<uint32_t> validArms = GetValidArms(static_cast<uint32_t>(targetNodeId), packetState);
-    // 无有效臂丢包
     if (validArms.empty()) {
-        if (!isDryRun) {
-            m_packetStateByUid.erase(pkt->GetUid());
+        std::ostringstream oss;
+        oss << "[UCB_DEBUG][DROP][NO_ARM]"
+            << " dry_run=" << (isDryRun ? 1 : 0)
+            << " node=" << m_node_id
+            << " src=" << sourceNodeId
+            << " dst=" << targetNodeId
+            << " uid=" << uid_for_log
+            << " hop=" << packetState.hopCount
+            << " ttl=" << static_cast<uint32_t>(ipHeader.GetTtl())
+            << " path=" << VectorToString(packetState.pathHistory);
+        DebugLog(oss.str());
+        if (allowLearning) {
+            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
         }
         return std::make_tuple(-1, -1, -1);
     }
 
-    double maxWeight = -std::numeric_limits<double>::infinity();
     uint32_t selectedNeighborId = validArms[0];
-    for (uint32_t neighborId : validArms) {
-        double weight = CalculateUcbWeight(neighborId, m_totalForwardCount);
-        if (weight > maxWeight) {
-            maxWeight = weight;
-            selectedNeighborId = neighborId;
+
+    bool randomSelect = false;
+    if (validArms.size() > 1 && m_randomVariable->GetValue(0.0, 1.0) < m_random_select_prob) {
+        randomSelect = true;
+    }
+    if (randomSelect) {
+        uint32_t randomIndex = m_randomVariable->GetInteger(0, validArms.size() - 1);
+        selectedNeighborId = validArms[randomIndex];
+    } else {
+        double maxWeight = -std::numeric_limits<double>::infinity();
+        for (uint32_t neighborId : validArms) {
+            double weight = CalculateUcbWeight(neighborId, m_totalForwardCount);
+            if (weight > maxWeight) {
+                maxWeight = weight;
+                selectedNeighborId = neighborId;
+            }
         }
     }
-    // 判断是否丢包
-    bool isDrop = IsPacketDrop(selectedNeighborId, packetState, ipHeader);
+    // 选完最优臂就总次数加1 防止丢包更新奖励加不上
+    if (allowLearning) {
+        m_totalForwardCount++;
+    }
+    bool isDrop = allowLearning && IsPacketDrop(selectedNeighborId, packetState, ipHeader);
     if (isDrop) {
-        if (!isDryRun) {
-            m_packetStateByUid.erase(pkt->GetUid());
+        m_totalDropCount++;
+        const LinkState &selectedLink = m_linkStateMap.at(selectedNeighborId);
+        std::ostringstream oss;
+        oss << "[UCB_DEBUG][DROP][POLICY]"
+            << " dry_run=" << (isDryRun ? 1 : 0)
+            << " node=" << m_node_id
+            << " src=" << sourceNodeId
+            << " dst=" << targetNodeId
+            << " uid=" << uid_for_log
+            << " hop=" << packetState.hopCount
+            << " ttl=" << static_cast<uint32_t>(ipHeader.GetTtl())
+            << " selected=" << selectedNeighborId
+            << " valid_arms=" << ArmSummaryToString(validArms)
+            << " qlen=" << selectedLink.queueLength
+            << " path=" << VectorToString(packetState.pathHistory);
+        DebugLog(oss.str());
+        if (allowLearning) {
+            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+            double reward = CalculateReward(
+                selectedNeighborId,
+                static_cast<uint32_t>(targetNodeId),
+                validArms,
+                false
+            );
+            UpdateUcbState(selectedNeighborId, reward);
         }
         return std::make_tuple(-1, -1, -1);
     }
 
     LinkState &selectedLink = m_linkStateMap[selectedNeighborId];
-    if (!isDryRun) {
-        m_totalForwardCount++;
+    if (!selectedLink.isAvailable) {
+        if (allowLearning && pkt) {
+            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        }
+        return std::make_tuple(-1, -1, -1);
+    }
+    bool forwardedToDestination = (selectedNeighborId == static_cast<uint32_t>(targetNodeId));
+    {
+        std::ostringstream oss;
+        oss << "[UCB_DEBUG][FWD]"
+            << " dry_run=" << (isDryRun ? 1 : 0)
+            << " node=" << m_node_id
+            << " src=" << sourceNodeId
+            << " dst=" << targetNodeId
+            << " uid=" << uid_for_log
+            << " hop=" << packetState.hopCount
+            << " ttl=" << static_cast<uint32_t>(ipHeader.GetTtl())
+            << " selected=" << selectedNeighborId
+            << " out_if=" << selectedLink.outInterfaceId
+            << " next_if=" << selectedLink.nextHopInInterfaceId
+            << " valid_arms=" << ArmSummaryToString(validArms)
+            << " path=" << VectorToString(packetState.pathHistory);
+        DebugLog(oss.str());
+    }
+    if (allowLearning) {
         uint32_t packetSizeByte = pkt->GetSize();
         UpdateLinkState(selectedNeighborId, packetSizeByte);
         double reward = CalculateReward(selectedNeighborId, static_cast<uint32_t>(targetNodeId), validArms, true);
         UpdateUcbState(selectedNeighborId, reward);
+        std::ostringstream oss;
+        oss << "[UCB_DEBUG][LEARN]"
+            << " node=" << m_node_id
+            << " src=" << sourceNodeId
+            << " dst=" << targetNodeId
+            << " uid=" << uid_for_log
+            << " selected=" << selectedNeighborId
+            << " reward=" << reward
+            << " qlen_after=" << selectedLink.queueLength
+            << " used_bits_after=" << selectedLink.usedCapacityBit;
+        DebugLog(oss.str());
+        if (forwardedToDestination) {
+            std::vector<uint32_t> arrivedPath = packetState.pathHistory;
+            if (arrivedPath.empty() || arrivedPath.back() != static_cast<uint32_t>(targetNodeId)) {
+                arrivedPath.push_back(static_cast<uint32_t>(targetNodeId));
+            }
+            std::ostringstream arrived;
+            arrived << "[UCB_DEBUG][ARRIVE]"
+                << " node=" << targetNodeId
+                << " src=" << sourceNodeId
+                << " dst=" << targetNodeId
+                << " uid=" << uid_for_log
+                << " hop=" << (packetState.hopCount + 1)
+                << " path=" << VectorToString(arrivedPath);
+            DebugLog(arrived.str());
+        }
+        if (forwardedToDestination && pkt) {
+            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        }
     }
 
     return std::make_tuple(
@@ -414,6 +758,8 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
 std::string ArbiterUcbDistributedRouting::StringReprOfForwardingState() {
     std::ostringstream oss;
     oss << "UCB Distributed Routing State of node " << m_node_id << std::endl;
+    oss << " -> Total forward count: " << m_totalForwardCount << std::endl;
+    oss << " -> Total drop count: " << m_totalDropCount << std::endl;
     for (auto &pair : m_ucbStateMap) {
         oss << " -> Neighbor " << pair.first
             << ": avgReward=" << pair.second.avgReward
@@ -422,8 +768,12 @@ std::string ArbiterUcbDistributedRouting::StringReprOfForwardingState() {
     return oss.str();
 }
 
+bool ArbiterUcbDistributedRouting::IsSatelliteNode(uint32_t nodeId) const {
+    return nodeId < m_numSatellites;
+}
+
 bool ArbiterUcbDistributedRouting::IsGroundStationNode(uint32_t nodeId) const {
-    return m_nodes.Get(nodeId)->GetObject<GroundStation>() != 0;
+    return !IsSatelliteNode(nodeId);
 }
 
 } // namespace ns3

@@ -30,7 +30,7 @@ local_shell = exputil.LocalShell()
 local_shell.remove_force_recursive("runs")
 local_shell.remove_force_recursive("pdf")
 local_shell.remove_force_recursive("data")
-
+# 遍历流量模式和卫星移动模式
 for traffic_mode in ["specific", "general"]:
     for movement in ["static", "moving"]:
 
@@ -41,6 +41,7 @@ for traffic_mode in ["specific", "general"]:
 
         # config_ns3.properties
         local_shell.copy_file("templates/template_config_ns3.properties", run_dir + "/config_ns3.properties")
+        # 替换占位符
         local_shell.sed_replace_in_file_plain(
             run_dir + "/config_ns3.properties",
             "[SATELLITE-NETWORK-FORCE-STATIC]",
@@ -60,10 +61,12 @@ for traffic_mode in ["specific", "general"]:
             random.seed(123456789)
             random.randint(0, 100000000)  # Legacy reasons
             seed_from_to = random.randint(0, 100000000)
+            # 地球站节点id范围
             a = set(range(1156, 1256))
             a.remove(1174)
             a.remove(1229)
             initial_list_from_to = [(1174, 1229), (1229, 1174)]
+            #随机配对
             initial_list_from_to = initial_list_from_to + networkload.generate_from_to_reciprocated_random_pairing(
                 list(a),
                 seed_from_to

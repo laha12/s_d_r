@@ -21,8 +21,10 @@
 # SOFTWARE.
 
 import sys
-sys.path.append("../../satgenpy")
-import satgen
+sys.path.append("../../satgenpy/satgen")
+from description.generate_description import generate_description
+from interfaces.generate_simple_gsl_interfaces_info import generate_simple_gsl_interfaces_info
+from isls.generate_plus_grid_isls import generate_plus_grid_isls
 import os
 import shutil
 
@@ -44,6 +46,26 @@ NUM_SATS_PER_ORB = 25
 ################################################################
 
 
+def normalize_tle_file(tle_filename):
+    with open(tle_filename, "r") as f_in:
+        lines = f_in.read().splitlines()
+    if len(lines) <= 1:
+        return
+    normalized = [lines[0]]
+    for idx, line in enumerate(lines[1:]):
+        if idx % 3 == 0:
+            normalized.append(line)
+        else:
+            if len(line) > 69:
+                normalized.append(line[:69])
+            elif len(line) < 69:
+                normalized.append(line.ljust(69))
+            else:
+                normalized.append(line)
+    with open(tle_filename, "w") as f_out:
+        f_out.write("\n".join(normalized) + "\n")
+
+
 def calculate(duration_s, time_step_ms, dynamic_state_algorithm, num_threads):
 
     # Add base name to setting
@@ -62,10 +84,11 @@ def calculate(duration_s, time_step_ms, dynamic_state_algorithm, num_threads):
     # TLEs
     print("Generating TLEs...")
     shutil.copy("input_data/legacy/starlink_tles_25x25.txt", "gen_data/" + name + "/tles.txt")
+    normalize_tle_file("gen_data/" + name + "/tles.txt")
 
     # ISLs
     print("Generating ISLs...")
-    satgen.generate_plus_grid_isls(
+    generate_plus_grid_isls(
         "gen_data/" + name + "/isls.txt",
         NUM_ORBS,
         NUM_SATS_PER_ORB,
@@ -75,27 +98,29 @@ def calculate(duration_s, time_step_ms, dynamic_state_algorithm, num_threads):
 
     # Description
     print("Generating description...")
-    satgen.generate_description(
+    generate_description(
         "gen_data/" + name + "/description.txt",
         MAX_GSL_LENGTH_M,
         MAX_ISL_LENGTH_M
     )
 
     # GSL interfaces
-    ground_stations = satgen.read_ground_stations_extended("gen_data/" + name + "/ground_stations.txt")
+    with open("gen_data/" + name + "/ground_stations.txt", "r") as f_in:
+        num_ground_stations = len([line for line in f_in if line.strip() != ""])
     if dynamic_state_algorithm == "algorithm_free_one_only_over_isls" \
-            or dynamic_state_algorithm == "algorithm_free_one_only_gs_relays":
+            or dynamic_state_algorithm == "algorithm_free_one_only_gs_relays" \
+            or dynamic_state_algorithm == "algorithm_ucb_distributed_routing":
         gsl_interfaces_per_satellite = 1
     elif dynamic_state_algorithm == "algorithm_paired_many_only_over_isls":
-        gsl_interfaces_per_satellite = len(ground_stations)
+        gsl_interfaces_per_satellite = num_ground_stations
     else:
         raise ValueError("Unknown dynamic state algorithm")
 
     print("Generating GSL interfaces info..")
-    satgen.generate_simple_gsl_interfaces_info(
+    generate_simple_gsl_interfaces_info(
         "gen_data/" + name + "/gsl_interfaces_info.txt",
         NUM_ORBS * NUM_SATS_PER_ORB,
-        len(ground_stations),
+        num_ground_stations,
         gsl_interfaces_per_satellite,  # GSL interfaces per satellite
         1,  # (GSL) Interfaces per ground station
         1,  # Aggregate max. bandwidth satellite (unit unspecified)
@@ -103,18 +128,22 @@ def calculate(duration_s, time_step_ms, dynamic_state_algorithm, num_threads):
     )
 
     # Forwarding state
-    print("Generating forwarding state...")
-    satgen.help_dynamic_state(
-        "gen_data",
-        num_threads,  # Number of threads
-        name,
-        time_step_ms,
-        duration_s,
-        MAX_GSL_LENGTH_M,
-        MAX_ISL_LENGTH_M,
-        dynamic_state_algorithm,
-        True
-    )
+    if dynamic_state_algorithm == "algorithm_ucb_distributed_routing":
+        print("Skip generating forwarding state for UCB distributed routing.")
+    else:
+        from dynamic_state.helper_dynamic_state import help_dynamic_state
+        print("Generating forwarding state...")
+        help_dynamic_state(
+            "gen_data",
+            num_threads,  # Number of threads
+            name,
+            time_step_ms,
+            duration_s,
+            MAX_GSL_LENGTH_M,
+            MAX_ISL_LENGTH_M,
+            dynamic_state_algorithm,
+            True
+        )
 
 
 def main():
@@ -122,7 +151,7 @@ def main():
     if len(args) != 4:
         print("Must supply exactly four arguments")
         print("Usage: python main_25x25.py [duration (s)] [time step (ms)] "
-              "[algorithm_{free_one_only_over_isls, free_one_only_gs_relays, paired_many_only_over_isls}] "
+              "[algorithm_{free_one_only_over_isls, free_one_only_gs_relays, paired_many_only_over_isls, ucb_distributed_routing, algorithm_ucb_distributed_routing}] "
               "[num threads]")
         exit(1)
     else:

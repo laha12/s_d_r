@@ -88,6 +88,18 @@ int main(int argc, char *argv[]) {
         double epsilon2 = parse_positive_double(
             basicSimulation->GetConfigParamOrDefault("ucb_epsilon2", "1e-9")
         );
+        double max_gsl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_gsl_length_m", "1089686.0")
+        );
+        double max_isl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_isl_length_m", "5442958.2030362869")
+        );
+        double random_select_prob = parse_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_random_select_prob", "0.1")
+        );
+        double dst_arrival_reward = parse_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_dst_arrival_reward", "2.0")
+        );
 
         std::vector<double> reward_weights;
         std::string reward_weights_str = basicSimulation->GetConfigParamOrDefault(
@@ -97,6 +109,10 @@ int main(int argc, char *argv[]) {
         for (std::string &s : w_str_list) {
             reward_weights.push_back(parse_double(s));
         }
+        int64_t dynamic_state_update_interval_ns = parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("dynamic_state_update_interval_ns", "100000000")
+        );
+        (void) dynamic_state_update_interval_ns;
         // 每个节点绑定一个ucb
         for (size_t i = 0; i < topology->GetNodes().GetN(); i++) {
             Ptr<ArbiterUcbDistributedRouting> arbiter = CreateObject<ArbiterUcbDistributedRouting>(
@@ -106,7 +122,11 @@ int main(int argc, char *argv[]) {
                 slot_duration_s,
                 reward_weights,
                 epsilon1,
-                epsilon2
+                epsilon2,
+                max_gsl_length_m,
+                max_isl_length_m,
+                random_select_prob,
+                dst_arrival_reward
             );
             topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
         }

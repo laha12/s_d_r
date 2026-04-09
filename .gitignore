@@ -1,5 +1,11 @@
 .idea
 *.pyc
 dev_testing/
-ns3-sat-sim/simulator/test_data/
-paper/ns3_experiments_ucb_25x25/
+paper/ns3_experiments_ucb_25x25/a_2_b/runs/
+paper/ns3_experiments_ucb_25x25/traffic_matrix_poisson/runs/
+.trae/
+.vscode/
+ns3-sat-sim/simulator/test_data/ucb_run/
+ns3-sat-sim/simulator/test_data/ucb_run_dynamic_verify/
+ns3-sat-sim/simulator/test_data/end_to_end/
+ns3-sat-sim/simulator/test_data/extract_test_data.sh
