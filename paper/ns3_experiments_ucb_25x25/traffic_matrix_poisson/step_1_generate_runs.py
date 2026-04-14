@@ -43,6 +43,11 @@ for run in get_tcp_run_list():
 
     local_shell.copy_file("templates/template_tcp_tm_config_ns3.properties", run_dir + "/config_ns3.properties")
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[SATELLITE-NETWORK]", str(run["satellite_network"]))
+    local_shell.sed_replace_in_file_plain(
+        run_dir + "/config_ns3.properties",
+        "[SATELLITE-NETWORK-FORCE-STATIC]",
+        "true" if run["satellite_network_force_static"] else "false"
+    )
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[DYNAMIC-STATE-UPDATE-INTERVAL-NS]", str(run["dynamic_state_update_interval_ns"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[SIMULATION-END-TIME-NS]", str(run["simulation_end_time_ns"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[ISL-DATA-RATE-MEGABIT-PER-S]", str(run["data_rate_megabit_per_s"]))

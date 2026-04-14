@@ -43,6 +43,16 @@ ArbiterSingleForwardHelper::ArbiterSingleForwardHelper (Ptr<BasicSimulation> bas
     // Load first forwarding state
     m_dynamicStateUpdateIntervalNs = parse_positive_int64(m_basicSimulation->GetConfigParamOrFail("dynamic_state_update_interval_ns"));
     std::cout << "  > Forward state update interval: " << m_dynamicStateUpdateIntervalNs << "ns" << std::endl;
+
+    (void)m_basicSimulation->GetConfigParamOrDefault("max_gsl_length_m", "0");
+    (void)m_basicSimulation->GetConfigParamOrDefault("max_isl_length_m", "0");
+    (void)m_basicSimulation->GetConfigParamOrDefault("ucb_max_hop_count", "0");
+    (void)m_basicSimulation->GetConfigParamOrDefault("ucb_slot_duration_s", "0");
+    (void)m_basicSimulation->GetConfigParamOrDefault("ucb_reward_weights", "");
+    (void)m_basicSimulation->GetConfigParamOrDefault("ucb_epsilon1", "0");
+    (void)m_basicSimulation->GetConfigParamOrDefault("ucb_epsilon2", "0");
+    (void)m_basicSimulation->GetConfigParamOrDefault("ucb_random_select_prob", "0");
+    (void)m_basicSimulation->GetConfigParamOrDefault("ucb_dst_arrival_reward", "0");
     std::cout << "  > Perform first forwarding state load for t=0" << std::endl;
     UpdateForwardingState(0);
     basicSimulation->RegisterTimestamp("Create initial single forwarding state");

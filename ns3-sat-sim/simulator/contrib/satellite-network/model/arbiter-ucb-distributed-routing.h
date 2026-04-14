@@ -23,11 +23,12 @@ public:
     void Deserialize(TagBuffer i) override;
     void Print(std::ostream &os) const override;
 
-    uint32_t srcNodeId;
-    uint32_t dstNodeId;
+    uint32_t instanceId = 0;
+    uint32_t srcNodeId = 0;
+    uint32_t dstNodeId = 0;
     std::vector<uint32_t> pathHistory;
-    double accumulatedDelayMs;
-    uint32_t hopCount;
+    double accumulatedDelayMs = 0.0;
+    uint32_t hopCount = 0;
 };
 
 struct UcbPacketState {

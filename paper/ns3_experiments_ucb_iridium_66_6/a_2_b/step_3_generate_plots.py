@@ -15,9 +15,9 @@ for run in get_tcp_run_list():
     local_shell.perfect_exec(
         "cd ../../../ns3-sat-sim/simulator/contrib/basic-sim/tools/plotting/plot_tcp_flow; "
         "python plot_tcp_flow.py "
-        "../../../../../../../paper/ns3_experiments_ucb_25x25/a_2_b/runs/" + run["name"] + "/logs_ns3 "
-        "../../../../../../../paper/ns3_experiments_ucb_25x25/a_2_b/data/" + run["name"] + " "
-        "../../../../../../../paper/ns3_experiments_ucb_25x25/a_2_b/pdf/" + run["name"] + " "
+        "../../../../../../../paper/ns3_experiments_ucb_iridium_66_6/a_2_b/runs/" + run["name"] + "/logs_ns3 "
+        "../../../../../../../paper/ns3_experiments_ucb_iridium_66_6/a_2_b/data/" + run["name"] + " "
+        "../../../../../../../paper/ns3_experiments_ucb_iridium_66_6/a_2_b/pdf/" + run["name"] + " "
         "0 " + str(1 * 1000 * 1000 * 1000),
         output_redirect=exputil.OutputRedirect.CONSOLE
     )

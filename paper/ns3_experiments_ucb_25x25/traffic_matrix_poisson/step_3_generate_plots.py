@@ -77,11 +77,16 @@ def aggregate_run_metrics(run):
     tcp_flows_rows = read_csv_rows(logs_ns_dir / "tcp_flows.csv")
     total_size_byte = sum(int(row[3]) for row in tcp_flows_rows if len(row) >= 8)
     total_sent_byte = sum(int(row[7]) for row in tcp_flows_rows if len(row) >= 8)
+    min_start_time_ns = min((int(row[4]) for row in tcp_flows_rows if len(row) >= 8), default=0)
 
     throughput_mbps = (total_sent_byte * 8.0) / (run["simulation_end_time_ns"] / 1e9) / 1e6
+    active_window_ns = max(1, run["simulation_end_time_ns"] - min_start_time_ns)
+    throughput_active_window_mbps = (total_sent_byte * 8.0) / (active_window_ns / 1e9) / 1e6
     drop_rate = 0.0 if total_size_byte == 0 else max(0.0, 1.0 - (total_sent_byte / float(total_size_byte)))
     avg_delay_ms = aggregate_avg_delay_ms(logs_ns_dir, run["simulation_end_time_ns"])
     load_balance_jain = aggregate_load_balance(logs_ns_dir)
+    completed_flows = sum(1 for row in tcp_flows_rows if len(row) >= 9 and row[8] == "YES")
+    completion_rate = 0.0 if len(tcp_flows_rows) == 0 else completed_flows / float(len(tcp_flows_rows))
 
     return {
         "run_name": run["name"],
@@ -89,9 +94,11 @@ def aggregate_run_metrics(run):
         "traffic_generation_rate_mbps": run["traffic_generation_rate_mbps"],
         "num_flows": len(tcp_flows_rows),
         "throughput_mbps": throughput_mbps,
+        "throughput_active_window_mbps": throughput_active_window_mbps,
         "load_balance_jain": load_balance_jain,
         "avg_delay_ms": avg_delay_ms,
         "drop_rate": drop_rate,
+        "completion_rate": completion_rate,
     }
 
 
@@ -140,9 +147,11 @@ with open(summary_csv_path, "w", newline="", encoding="utf-8") as f:
         "traffic_generation_rate_mbps",
         "num_flows",
         "throughput_mbps",
+        "throughput_active_window_mbps",
         "load_balance_jain",
         "avg_delay_ms",
         "drop_rate",
+        "completion_rate",
     ])
     for row in sorted(summary_rows, key=lambda x: (x["algorithm"], x["traffic_generation_rate_mbps"])):
         writer.writerow([
@@ -151,14 +160,18 @@ with open(summary_csv_path, "w", newline="", encoding="utf-8") as f:
             row["traffic_generation_rate_mbps"],
             row["num_flows"],
             row["throughput_mbps"],
+            row["throughput_active_window_mbps"],
             row["load_balance_jain"],
             row["avg_delay_ms"],
             row["drop_rate"],
+            row["completion_rate"],
         ])
 
 plot_metric(summary_rows, "throughput_mbps", "Throughput (Mbps)", "pdf/throughput_vs_rate.png", "pdf/throughput_vs_rate.pdf")
+plot_metric(summary_rows, "throughput_active_window_mbps", "Throughput on Active Window (Mbps)", "pdf/throughput_active_window_vs_rate.png", "pdf/throughput_active_window_vs_rate.pdf")
 plot_metric(summary_rows, "load_balance_jain", "Load Balance (Jain Index)", "pdf/load_balance_vs_rate.png", "pdf/load_balance_vs_rate.pdf")
 plot_metric(summary_rows, "avg_delay_ms", "Average End-to-End Delay (ms)", "pdf/avg_delay_vs_rate.png", "pdf/avg_delay_vs_rate.pdf")
 plot_metric(summary_rows, "drop_rate", "Drop Rate", "pdf/drop_rate_vs_rate.png", "pdf/drop_rate_vs_rate.pdf")
+plot_metric(summary_rows, "completion_rate", "Flow Completion Rate", "pdf/completion_rate_vs_rate.png", "pdf/completion_rate_vs_rate.pdf")
 
 print("Generated summary metrics and plots.")

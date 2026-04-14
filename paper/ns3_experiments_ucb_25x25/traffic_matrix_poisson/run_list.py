@@ -3,23 +3,24 @@ import random
 
 
 dynamic_state_update_interval_ms = 100
-simulation_end_time_s = 2
+simulation_end_time_s = 50
 enable_isl_utilization_tracking = True
+satellite_network_force_static = True
 isl_utilization_tracking_interval_ns = 1 * 1000 * 1000 * 1000
 
 dynamic_state_update_interval_ns = dynamic_state_update_interval_ms * 1000 * 1000
 simulation_end_time_ns = simulation_end_time_s * 1000 * 1000 * 1000
 satellite_network = "25x25_algorithm_ucb_distributed_routing"
 
-traffic_generation_rates_mbps = [2,2.2,2.4,2.6]
+traffic_generation_rates_mbps = [0.001,0.003,0.005,0.008]
 traffic_slot_len_ns = dynamic_state_update_interval_ns
-tcp_flow_size_byte = 1000000
+tcp_flow_size_byte = 10000
 traffic_seed = 123456789
 pairing_seed = 987654321
 
 ucb_max_hop_count = 64
 ucb_slot_duration_s = 0.1
-ucb_reward_weights = "list(0,0,0,1)"
+ucb_reward_weights = "list(0.2,0.2,0.2,0.4)"
 ucb_epsilon1 = "1e-9"
 ucb_epsilon2 = "1e-9"
 ucb_random_select_prob = "0.1"
@@ -111,6 +112,7 @@ def get_tcp_run_list():
                     "algorithm_label": algorithm["label"],
                     "dynamic_state_update_interval_ns": dynamic_state_update_interval_ns,
                     "simulation_end_time_ns": simulation_end_time_ns,
+                    "satellite_network_force_static": satellite_network_force_static,
                     "data_rate_megabit_per_s": 10.0,
                     "queue_size_pkt": 100,
                     "enable_isl_utilization_tracking": enable_isl_utilization_tracking,

@@ -1,2 +1,0 @@
-run_name,algorithm,traffic_generation_rate_mbps,num_flows,throughput_mbps,load_balance_jain,avg_delay_ms,drop_rate
-tm_poisson_40_0_Mbps_with_TcpVegas_ucb,ucb,40.0,7,0.0,0.16839955400295442,nan,1.0

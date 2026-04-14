@@ -23,9 +23,9 @@ for run in get_tcp_run_list():
     local_shell.remove_force_recursive(logs_ns3_dir + "/ucb_route_debug.txt")
     commands_to_run.append(
         "cd ../../../ns3-sat-sim/simulator; "
-        "UCB_ROUTE_DEBUG_PATH='../../paper/ns3_experiments_ucb_25x25/a_2_b/" + logs_ns3_dir + "/ucb_route_debug.txt' "
-        "./waf --run=\"main_satnet --run_dir='../../paper/ns3_experiments_ucb_25x25/a_2_b/runs/" + run["name"] + "'\" "
-        "2>&1 | tee '../../paper/ns3_experiments_ucb_25x25/a_2_b/" + logs_ns3_dir + "/console.txt'"
+        "UCB_ROUTE_DEBUG_PATH='../../paper/ns3_experiments_ucb_iridium_66_6/a_2_b/" + logs_ns3_dir + "/ucb_route_debug.txt' "
+        "./waf --run=\"main_satnet --run_dir='../../paper/ns3_experiments_ucb_iridium_66_6/a_2_b/runs/" + run["name"] + "'\" "
+        "2>&1 | tee '../../paper/ns3_experiments_ucb_iridium_66_6/a_2_b/" + logs_ns3_dir + "/console.txt'"
     )
     
     run_names.append(run["name"])

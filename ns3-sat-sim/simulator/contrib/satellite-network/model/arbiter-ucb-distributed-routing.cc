@@ -25,6 +25,7 @@ const size_t kUcbRouteDebugMaxArmsToPrint = 32;
 uint64_t g_ucb_route_debug_line_count = 0;
 std::ofstream g_ucb_route_debug_file;
 bool g_ucb_route_debug_file_initialized = false;
+uint32_t g_ucb_packet_instance_counter = 1;
 std::map<uint64_t, UcbPacketState> g_ucb_packet_state_by_uid;
 
 std::string VectorToString(const std::vector<uint32_t>& vec) {
@@ -68,6 +69,33 @@ void DebugLog(const std::string& msg) {
         g_ucb_route_debug_line_count++;
     }
 }
+
+uint64_t GetOriginalNs3PacketUid(Ptr<const Packet> pkt) {
+    return pkt ? pkt->GetUid() : 0;
+}
+
+uint64_t GetOrCreateRoutingPacketUid(Ptr<const Packet> pkt) {
+    if (!pkt) {
+        return 0;
+    }
+
+    UcbRoutingTag tag{};
+    // 先读取已有tag
+    if (pkt->PeekPacketTag(tag) && tag.instanceId != 0) {
+        return tag.instanceId;
+    }
+    // const转可写
+    Packet* mutablePacket = const_cast<Packet*>(pkt.operator->());
+    if (mutablePacket == nullptr) {
+        return 0;
+    }
+    // 分配新tag 并写入
+    if (tag.instanceId == 0) {
+        tag.instanceId = g_ucb_packet_instance_counter++;
+    }
+    mutablePacket->AddPacketTag(tag);
+    return tag.instanceId;
+}
 }
 
 NS_LOG_COMPONENT_DEFINE("ArbiterUcbDistributedRouting");
@@ -86,10 +114,11 @@ TypeId UcbRoutingTag::GetInstanceTypeId(void) const {
 }
 
 uint32_t UcbRoutingTag::GetSerializedSize(void) const {
-    return 4 + 4 + 4 + 8 + 4 + pathHistory.size() * 4;
+    return 4 + 4 + 4 + 4 + 8 + 4 + pathHistory.size() * 4;
 }
 
 void UcbRoutingTag::Serialize(TagBuffer i) const {
+    i.WriteU32(instanceId);
     i.WriteU32(srcNodeId);
     i.WriteU32(dstNodeId);
     i.WriteU32(hopCount);
@@ -101,6 +130,7 @@ void UcbRoutingTag::Serialize(TagBuffer i) const {
 }
 
 void UcbRoutingTag::Deserialize(TagBuffer i) {
+    instanceId = i.ReadU32();
     srcNodeId = i.ReadU32();
     dstNodeId = i.ReadU32();
     hopCount = i.ReadU32();
@@ -113,7 +143,7 @@ void UcbRoutingTag::Deserialize(TagBuffer i) {
 }
 
 void UcbRoutingTag::Print(std::ostream &os) const {
-    os << "src=" << srcNodeId << ", dst=" << dstNodeId << ", hops=" << hopCount;
+    os << "instance=" << instanceId << ", src=" << srcNodeId << ", dst=" << dstNodeId << ", hops=" << hopCount;
 }
 
 // ==================== ArbiterUcbDistributedRouting 实现 ====================
@@ -571,17 +601,23 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
 ) {
     bool isDryRun = isRequestForSourceIpSoNoNextHeader;
     bool allowLearning = !isDryRun && ipHeader.GetTtl() > 0;
+    // uint64_t state_uid = pkt ? pkt->GetUid() : 0;
+    uint64_t state_uid = allowLearning ? GetOrCreateRoutingPacketUid(pkt) : 0;
+    uint64_t ns3_uid_for_log = GetOriginalNs3PacketUid(pkt);
     if (m_node_id == targetNodeId) {
-        if (allowLearning && pkt) {
-            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        if (allowLearning && state_uid != 0) {
+            // g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+            g_ucb_packet_state_by_uid.erase(state_uid);
         }
         return std::make_tuple(-1, -1, -1);
     }
 
-    uint64_t uid_for_log = pkt ? pkt->GetUid() : 0;
+    // uint64_t uid_for_log = state_uid != 0 ? state_uid : ns3_uid_for_log;
+    uint64_t uid_for_log = state_uid;
     UcbPacketState packetState;
     if (allowLearning) {
-        uint64_t uid = pkt->GetUid();
+        // uint64_t uid = pkt->GetUid();
+        uint64_t uid = state_uid;
         auto it = g_ucb_packet_state_by_uid.find(uid);
         if (it == g_ucb_packet_state_by_uid.end()) {
             packetState = InitPacketState(sourceNodeId, targetNodeId);
@@ -623,12 +659,14 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
             << " src=" << sourceNodeId
             << " dst=" << targetNodeId
             << " uid=" << uid_for_log
+            << " ns3_uid=" << ns3_uid_for_log
             << " hop=" << packetState.hopCount
             << " ttl=" << static_cast<uint32_t>(ipHeader.GetTtl())
             << " path=" << VectorToString(packetState.pathHistory);
         DebugLog(oss.str());
-        if (allowLearning) {
-            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        if (allowLearning && state_uid != 0) {
+            // g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+            g_ucb_packet_state_by_uid.erase(state_uid);
         }
         return std::make_tuple(-1, -1, -1);
     }
@@ -667,6 +705,7 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
             << " src=" << sourceNodeId
             << " dst=" << targetNodeId
             << " uid=" << uid_for_log
+            << " ns3_uid=" << ns3_uid_for_log
             << " hop=" << packetState.hopCount
             << " ttl=" << static_cast<uint32_t>(ipHeader.GetTtl())
             << " selected=" << selectedNeighborId
@@ -674,8 +713,9 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
             << " qlen=" << selectedLink.queueLength
             << " path=" << VectorToString(packetState.pathHistory);
         DebugLog(oss.str());
-        if (allowLearning) {
-            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        if (allowLearning && state_uid != 0) {
+            // g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+            g_ucb_packet_state_by_uid.erase(state_uid);
             double reward = CalculateReward(
                 selectedNeighborId,
                 static_cast<uint32_t>(targetNodeId),
@@ -689,8 +729,9 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
 
     LinkState &selectedLink = m_linkStateMap[selectedNeighborId];
     if (!selectedLink.isAvailable) {
-        if (allowLearning && pkt) {
-            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        if (allowLearning && state_uid != 0) {
+            // g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+            g_ucb_packet_state_by_uid.erase(state_uid);
         }
         return std::make_tuple(-1, -1, -1);
     }
@@ -703,6 +744,7 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
             << " src=" << sourceNodeId
             << " dst=" << targetNodeId
             << " uid=" << uid_for_log
+            << " ns3_uid=" << ns3_uid_for_log
             << " hop=" << packetState.hopCount
             << " ttl=" << static_cast<uint32_t>(ipHeader.GetTtl())
             << " selected=" << selectedNeighborId
@@ -723,6 +765,7 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
             << " src=" << sourceNodeId
             << " dst=" << targetNodeId
             << " uid=" << uid_for_log
+            << " ns3_uid=" << ns3_uid_for_log
             << " selected=" << selectedNeighborId
             << " reward=" << reward
             << " qlen_after=" << selectedLink.queueLength
@@ -739,12 +782,14 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
                 << " src=" << sourceNodeId
                 << " dst=" << targetNodeId
                 << " uid=" << uid_for_log
+                << " ns3_uid=" << ns3_uid_for_log
                 << " hop=" << (packetState.hopCount + 1)
                 << " path=" << VectorToString(arrivedPath);
             DebugLog(arrived.str());
         }
-        if (forwardedToDestination && pkt) {
-            g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+        if (forwardedToDestination && state_uid != 0) {
+            // g_ucb_packet_state_by_uid.erase(pkt->GetUid());
+            g_ucb_packet_state_by_uid.erase(state_uid);
         }
     }
 

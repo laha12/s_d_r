@@ -155,8 +155,10 @@ def generate_tcp_flow_schedule(
     node_pairs,
     slot_len_ns,
     sim_end_ns,
-    rate_mbps,
-    flow_size_byte,
+    rate_mbps=None,
+    flow_size_byte=1000000,
+    packet_lambda_per_s=None,
+    packet_size_byte=1500,
     traffic_start_ns=0,
     traffic_end_ns=None,
     pair_start_times=None,
@@ -168,10 +170,16 @@ def generate_tcp_flow_schedule(
         raise ValueError("slot_len_ns 必须大于 0")
     if sim_end_ns <= 0:
         raise ValueError("sim_end_ns 必须大于 0")
-    if rate_mbps < 0:
+    if rate_mbps is not None and rate_mbps < 0:
         raise ValueError("rate_mbps 不能为负数")
+    if packet_lambda_per_s is not None and packet_lambda_per_s < 0:
+        raise ValueError("packet_lambda_per_s 不能为负数")
+    if rate_mbps is None and packet_lambda_per_s is None:
+        raise ValueError("TCP 模式下至少需要提供 rate_mbps 或 packet_lambda_per_s")
     if flow_size_byte <= 0:
         raise ValueError("flow_size_byte 必须大于 0")
+    if packet_size_byte <= 0:
+        raise ValueError("packet_size_byte 必须大于 0")
     if traffic_start_ns < 0:
         raise ValueError("traffic_start_ns 不能为负数")
     if traffic_end_ns is None:
@@ -208,9 +216,18 @@ def generate_tcp_flow_schedule(
 
     slot_len_s = slot_len_ns / 1e9
     num_slots = sim_end_ns // slot_len_ns
-    total_rate_bps = rate_mbps * 1e6
-    per_pair_rate_bps = total_rate_bps / len(node_pairs)
-    lambda_per_s = per_pair_rate_bps / (flow_size_byte * 8.0)
+    if packet_lambda_per_s is not None:
+        lambda_per_s = packet_lambda_per_s
+        schedule_size_byte = packet_size_byte
+        lambda_mode = "packet"
+    else:
+        # IMPORTANT:
+        # rate_mbps is interpreted as per source-destination pair (i.e., per ground station source stream),
+        # not as a global aggregate rate over all pairs.
+        per_pair_rate_bps = rate_mbps * 1e6
+        lambda_per_s = per_pair_rate_bps / (flow_size_byte * 8.0)
+        schedule_size_byte = flow_size_byte
+        lambda_mode = "flow_per_pair_rate_mbps"
 
     events = []
     for t in range(num_slots):
@@ -238,7 +255,9 @@ def generate_tcp_flow_schedule(
                 start_time_ns = start_low_ns + int(random.random() * (start_high_ns - start_low_ns))
                 metadata = (
                     f"slot={t};src={src_id};dst={dst_id};"
-                    f"rate_mbps={rate_mbps};flow_size_byte={flow_size_byte}"
+                    f"rate_mbps={rate_mbps};flow_size_byte={flow_size_byte};"
+                    f"packet_lambda_per_s={packet_lambda_per_s};packet_size_byte={packet_size_byte};"
+                    f"lambda_mode={lambda_mode}"
                 )
                 events.append((start_time_ns, src_id, dst_id, metadata))
 
@@ -247,7 +266,7 @@ def generate_tcp_flow_schedule(
     with open(out_csv_path, "w", encoding="utf-8") as f:
         for flow_id, event in enumerate(events):
             start_time_ns, src_id, dst_id, metadata = event
-            line = f"{flow_id},{src_id},{dst_id},{flow_size_byte},{start_time_ns},,{metadata}"
+            line = f"{flow_id},{src_id},{dst_id},{schedule_size_byte},{start_time_ns},,{metadata}"
             f.write(line + "\n")
 
     print(f"写入完成: {out_csv_path}")
@@ -275,8 +294,15 @@ def build_arg_parser():
     )
     # *0.012
     parser.add_argument("--lambda-per-s", type=float, default=10)
-    parser.add_argument("--rate-mbps", type=float, default=None)
+    parser.add_argument(
+        "--rate-mbps",
+        type=float,
+        default=None,
+        help="TCP flow mode: per source-destination pair rate in Mbps (not global aggregate rate)",
+    )
+    parser.add_argument("--packet-lambda-per-s", type=float, default=None)
     parser.add_argument("--flow-size-byte", type=int, default=1000000)
+    parser.add_argument("--packet-size-byte", type=int, default=1500)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--print-samples", action="store_true")
     return parser
@@ -303,15 +329,17 @@ if __name__ == "__main__":
             print_samples=args.print_samples,
         )
     else:
-        if args.rate_mbps is None:
-            raise ValueError("TCP 模式下必须提供 --rate-mbps")
+        if args.rate_mbps is None and args.packet_lambda_per_s is None:
+            raise ValueError("TCP 模式下必须提供 --rate-mbps 或 --packet-lambda-per-s")
         generate_tcp_flow_schedule(
             out_csv_path=args.out_csv_path,
             node_pairs=node_pairs,
             slot_len_ns=args.slot_len_ns,
             sim_end_ns=args.sim_end_ns,
             rate_mbps=args.rate_mbps,
+            packet_lambda_per_s=args.packet_lambda_per_s,
             flow_size_byte=args.flow_size_byte,
+            packet_size_byte=args.packet_size_byte,
             traffic_start_ns=args.traffic_start_ns,
             traffic_end_ns=args.traffic_end_ns,
             pair_start_times=pair_start_times,
