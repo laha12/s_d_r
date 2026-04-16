@@ -1,12 +1,28 @@
 import csv
 import exputil
 import importlib.util
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 try:
     from .run_list import get_tcp_run_list
 except (ImportError, SystemError):
     from run_list import get_tcp_run_list
+
+
+def archive_if_exists(local_shell, dir_name):
+    if not Path(dir_name).exists():
+        return
+    timestamp = datetime.now().strftime("%m%d%H%M")
+    archive_dir = f"archive_{timestamp}"
+    Path(archive_dir).mkdir(parents=True, exist_ok=True)
+    dest = Path(archive_dir) / dir_name
+    if dest.exists():
+        print(f"  Archive {dest} already exists, skipping.")
+        return
+    print(f"  Archiving {dir_name}/ -> {archive_dir}/{dir_name}/")
+    shutil.copytree(dir_name, str(dest), symlinks=True)
 
 
 def load_generate_data_module():
@@ -27,8 +43,19 @@ def build_tcp_flow_log_set(num_flows):
     return "set(" + ",".join(str(i) for i in range(num_flows)) + ")"
 
 
+def generate_dynamic_state_dir_name(dynamic_state_update_interval_ns, simulation_end_time_ns):
+    interval_ms = dynamic_state_update_interval_ns // 1000000
+    duration_s = simulation_end_time_ns // 1000000000
+    return f"dynamic_state_{interval_ms}ms_for_{duration_s}s"
+
+
 local_shell = exputil.LocalShell()
 generate_data_module = load_generate_data_module()
+
+print("Archiving existing data/pdf/runs before removal...")
+archive_if_exists(local_shell, "runs")
+archive_if_exists(local_shell, "pdf")
+archive_if_exists(local_shell, "data")
 
 local_shell.remove_force_recursive("runs")
 local_shell.remove_force_recursive("pdf")
@@ -43,6 +70,8 @@ for run in get_tcp_run_list():
 
     local_shell.copy_file("templates/template_tcp_tm_config_ns3.properties", run_dir + "/config_ns3.properties")
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[SATELLITE-NETWORK]", str(run["satellite_network"]))
+    dynamic_state_dir = generate_dynamic_state_dir_name(run["dynamic_state_update_interval_ns"], run["simulation_end_time_ns"])
+    local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[DYNAMIC-STATE-DIR]", dynamic_state_dir)
     local_shell.sed_replace_in_file_plain(
         run_dir + "/config_ns3.properties",
         "[SATELLITE-NETWORK-FORCE-STATIC]",
@@ -72,6 +101,10 @@ for run in get_tcp_run_list():
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[UCB-EPSILON2]", str(run["ucb_epsilon2"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[UCB-RANDOM-SELECT-PROB]", str(run["ucb_random_select_prob"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[UCB-DST-ARRIVAL-REWARD]", str(run["ucb_dst_arrival_reward"]))
+    local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[UCB-QUEUE-DROP-THRESHOLD]", str(run["ucb_queue_drop_threshold"]))
+    local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[UCB-REFERENCE-DELAY-MS]", str(run["ucb_reference_delay_ms"]))
+    local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[UCB-REFERENCE-DISTANCE-M]", str(run["ucb_reference_distance_m"]))
+    local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[UCB-SLOT-DECAY-FACTOR]", str(run["ucb_slot_decay_factor"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[MAX-GSL-LENGTH-M]", str(run["max_gsl_length_m"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties", "[MAX-ISL-LENGTH-M]", str(run["max_isl_length_m"]))
 
@@ -83,6 +116,7 @@ for run in get_tcp_run_list():
         sim_end_ns=run["simulation_end_time_ns"],
         rate_mbps=run["traffic_generation_rate_mbps"],
         flow_size_byte=run["tcp_flow_size_byte"],
+        min_flow_interval_ns=run["min_flow_interval_ns"],
         seed=run["traffic_seed"],
     )
 

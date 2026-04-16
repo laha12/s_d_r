@@ -100,10 +100,22 @@ int main(int argc, char *argv[]) {
         double dst_arrival_reward = parse_double(
             basicSimulation->GetConfigParamOrDefault("ucb_dst_arrival_reward", "2.0")
         );
+        uint32_t queue_drop_threshold = (uint32_t) parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("ucb_queue_drop_threshold", "100")
+        );
+        double reference_delay_ms = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_reference_delay_ms", "100.0")
+        );
+        double reference_distance_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_reference_distance_m", "10000000.0")
+        );
+        double slot_decay_factor = parse_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_slot_decay_factor", "0.5")
+        );
 
         std::vector<double> reward_weights;
         std::string reward_weights_str = basicSimulation->GetConfigParamOrDefault(
-            "ucb_reward_weights", "list(0.25,0.25,0.25,0.25)"
+            "ucb_reward_weights", "list(0.333,0.333,0.334)"
         );
         std::vector<std::string> w_str_list = parse_list_string(reward_weights_str);
         for (std::string &s : w_str_list) {
@@ -126,7 +138,11 @@ int main(int argc, char *argv[]) {
                 max_gsl_length_m,
                 max_isl_length_m,
                 random_select_prob,
-                dst_arrival_reward
+                dst_arrival_reward,
+                queue_drop_threshold,
+                reference_delay_ms,
+                reference_distance_m,
+                slot_decay_factor
             );
             topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
         }

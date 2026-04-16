@@ -1,19 +1,19 @@
 from pathlib import Path
 
-dynamic_state_update_interval_ms = 100
-simulation_end_time_s = 50
+dynamic_state_update_interval_ms = 1000
+simulation_end_time_s = 10
 pingmesh_interval_ns = 1 * 1000 * 1000
-enable_isl_utilization_tracking = True
-isl_utilization_tracking_interval_ns = 1 * 1000 * 1000 * 1000
+enable_isl_utilization_tracking = False
+isl_utilization_tracking_interval_ns = 1 * 100 * 1000 * 1000
 
 dynamic_state_update_interval_ns = dynamic_state_update_interval_ms * 1000 * 1000
 simulation_end_time_ns = simulation_end_time_s * 1000 * 1000 * 1000
-satellite_network = "iridium_789_66_6_isls_plus_grid_ground_stations_top_100_algorithm_ucb_distributed_routing"
+satellite_network = "iridium_789_66_6_isls_plus_grid_ground_stations_top_10_algorithm_ucb_distributed_routing"
 
-satellite_network_force_static=True
+satellite_network_force_static=False
 
 ucb_max_hop_count = 64
-ucb_slot_duration_s = 0.1
+ucb_slot_duration_s = 1
 ucb_reward_weights = "list(0.2,0.2,0.2,0.4)"
 ucb_epsilon1 = "1e-9"
 ucb_epsilon2 = "1e-9"
@@ -36,14 +36,8 @@ def read_satellite_description(satellite_network_name):
     return values
 
 chosen_pairs = [
-    ("iridium_789_66_6", 66, 101, "TcpNewReno", satellite_network),
-    ("iridium_789_66_6", 69, 75, "TcpNewReno", satellite_network),
-    ("iridium_789_66_6", 150, 95, "TcpNewReno", satellite_network),
-    ("iridium_789_66_6", 162, 77, "TcpNewReno", satellite_network),
-    ("iridium_789_66_6", 74, 164, "TcpNewReno", satellite_network),
-    ("iridium_789_66_6", 102, 126, "TcpNewReno", satellite_network),
-    ("iridium_789_66_6", 124, 87, "TcpNewReno", satellite_network),
-    ("iridium_789_66_6", 73, 149, "TcpNewReno", satellite_network),
+    ("iridium_789_66_6", 75, 71, "TcpNewReno", satellite_network),
+    ("iridium_789_66_6", 71, 75, "TcpNewReno", satellite_network),
     # ,
     # ("25x25", 651, 683, "TcpVegas", satellite_network)
 ]

@@ -165,7 +165,11 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
     double maxGslLengthM,
     double maxIslLengthM,
     double randomSelectProb,
-    double dstArrivalReward
+    double dstArrivalReward,
+    uint32_t queueDropThreshold,
+    double referenceDelayMs,
+    double referenceDistanceM,
+    double slotDecayFactor
 ) : ArbiterSatnet(this_Node, nodes) {
     m_node_id = this_Node->GetId();
     m_maxHopCount = maxHopCount;
@@ -187,7 +191,7 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
         }
     }
     // 默认均分
-    m_rewardWeights = std::vector<double>{0.25, 0.25, 0.25, 0.25};
+    m_rewardWeights = std::vector<double>{1.0/3.0, 1.0/3.0, 1.0/3.0};
     // 自定义奖励权重 截断处理
     for (size_t i = 0; i < std::min(m_rewardWeights.size(), rewardWeights.size()); i++) {
         m_rewardWeights[i] = rewardWeights[i];
@@ -198,6 +202,10 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
     m_max_isl_length_m = maxIslLengthM;
     m_random_select_prob = randomSelectProb;
     m_dst_arrival_reward = dstArrivalReward;
+    m_queue_drop_threshold = queueDropThreshold;
+    m_reference_delay_ms = referenceDelayMs;
+    m_reference_distance_m = referenceDistanceM;
+    m_slot_decay_factor = slotDecayFactor;
     NS_ABORT_MSG_IF(
         m_random_select_prob < 0.0 || m_random_select_prob > 1.0,
         "ucb_random_select_prob must be in [0, 1]"
@@ -342,6 +350,14 @@ void ArbiterUcbDistributedRouting::SlotResetHandler()
     m_currentSlot++;
     m_lastSlotUpdateTimeNs = Simulator::Now().GetNanoSeconds();
     ResetSlotDynamicState();
+    for (auto &pair : m_ucbStateMap) {
+        UcbState &ucbState = pair.second;
+        ucbState.selectCount = static_cast<uint32_t>(ucbState.selectCount * m_slot_decay_factor);
+        if (ucbState.selectCount == 0) {
+            ucbState.selectCount = 1;
+        }
+        ucbState.avgReward = ucbState.avgReward * m_slot_decay_factor;
+    }
     Simulator::Schedule(Seconds(m_slotDurationS), &ArbiterUcbDistributedRouting::SlotResetHandler, this);
 }
 
@@ -485,12 +501,15 @@ double ArbiterUcbDistributedRouting::CalculateReward(
     if (neighborId == targetNodeId && transmitSuccess) {
         return m_dst_arrival_reward;
     }
+
+    if (!transmitSuccess) {
+        return -1.0;
+    }
     
     const LinkState &linkState = m_linkStateMap.at(neighborId);
     double w1 = m_rewardWeights[0];
     double w2 = m_rewardWeights[1];
     double w3 = m_rewardWeights[2];
-    double w4 = m_rewardWeights[3];
 
     NS_ABORT_MSG_IF(candidateArms.empty(), "candidateArms must not be empty when calculating reward.");
     NS_ABORT_MSG_IF
@@ -499,40 +518,19 @@ double ArbiterUcbDistributedRouting::CalculateReward(
         "neighborId must be one of candidateArms when calculating reward."
     );
 
-    double maxDelayMs = m_epsilon2;
-    double maxLoadRate = m_epsilon2;
-    double maxDist = m_epsilon2;
-    for (uint32_t candidateId : candidateArms)
-    {
-        const LinkState &candidateLink = m_linkStateMap.at(candidateId);
-        double qd = (candidateLink.queueLength * 1500.0 * 8.0) / std::max(candidateLink.transmissionRateBps, m_epsilon2) * 1000.0;
-        double td = candidateLink.propagationDelayMs + qd;
-        maxDelayMs = std::max(maxDelayMs, td);
-        double lr = candidateLink.usedCapacityBit / std::max(candidateLink.maxCapacityBit, m_epsilon2);
-        maxLoadRate = std::max(maxLoadRate, lr);
-        double dist = CalculateDistanceToDestination(candidateId, targetNodeId);
-        maxDist = std::max(maxDist, dist);
-    }
-
-    double throughputReward = (linkState.maxCapacityBit - linkState.usedCapacityBit)
-        / std::max(linkState.maxCapacityBit, m_epsilon2);
-    throughputReward = std::max(0.0, throughputReward);
-
     double queuingDelayMs = (linkState.queueLength * 1500.0 * 8.0) / std::max(linkState.transmissionRateBps, m_epsilon2) * 1000.0;
     double totalDelayMs = linkState.propagationDelayMs + queuingDelayMs;
-    double delayReward = 1.0 - (totalDelayMs / std::max(maxDelayMs, m_epsilon2));
-    delayReward = std::max(0.0, delayReward);
+    double delayReward = std::exp(-totalDelayMs / std::max(m_reference_delay_ms, m_epsilon2));
 
     double currentLoadRate = linkState.usedCapacityBit / std::max(linkState.maxCapacityBit, m_epsilon2);
-    double loadBalanceReward = 1.0 - (currentLoadRate / std::max(maxLoadRate, m_epsilon2));
+    double loadBalanceReward = 1.0 - std::min(currentLoadRate, 1.0);
     loadBalanceReward = std::max(0.0, loadBalanceReward);
 
     double currentDist = CalculateDistanceToDestination(neighborId, targetNodeId);
-    double distanceReward = 1.0 - (currentDist / std::max(maxDist, m_epsilon2));
-    distanceReward = std::max(0.0, distanceReward);
+    double distanceReward = std::exp(-currentDist / std::max(m_reference_distance_m, m_epsilon2));
 
-    double totalReward = w1 * throughputReward + w2 * delayReward + w3 * loadBalanceReward + w4 * distanceReward;
-    return std::max(0.0, totalReward);
+    double totalReward = w1 * delayReward + w2 * loadBalanceReward + w3 * distanceReward;
+    return totalReward;
 }
 
 void ArbiterUcbDistributedRouting::UpdateUcbState(uint32_t selectedNeighborId, double reward) {
@@ -586,7 +584,7 @@ bool ArbiterUcbDistributedRouting::IsPacketDrop(
         return true;
     }
     const LinkState &linkState = m_linkStateMap.at(neighborId);
-    if (linkState.queueLength >= 100) {
+    if (linkState.queueLength >= m_queue_drop_threshold) {
         return true;
     }
     return false;
@@ -716,6 +714,7 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
         if (allowLearning && state_uid != 0) {
             // g_ucb_packet_state_by_uid.erase(pkt->GetUid());
             g_ucb_packet_state_by_uid.erase(state_uid);
+            // 丢包计算给负奖励
             double reward = CalculateReward(
                 selectedNeighborId,
                 static_cast<uint32_t>(targetNodeId),

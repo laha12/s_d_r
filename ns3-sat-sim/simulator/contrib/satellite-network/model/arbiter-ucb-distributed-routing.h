@@ -53,7 +53,11 @@ public:
         double maxGslLengthM,
         double maxIslLengthM,
         double randomSelectProb,
-        double dstArrivalReward
+        double dstArrivalReward,
+        uint32_t queueDropThreshold,
+        double referenceDelayMs,
+        double referenceDistanceM,
+        double slotDecayFactor
     );
     ~ArbiterUcbDistributedRouting() override;
 
@@ -106,6 +110,10 @@ private:
     double m_max_isl_length_m;
     double m_random_select_prob;
     double m_dst_arrival_reward;
+    uint32_t m_queue_drop_threshold;
+    double m_reference_delay_ms;
+    double m_reference_distance_m;
+    double m_slot_decay_factor;
     Ptr<UniformRandomVariable> m_randomVariable;
     UcbPacketState InitPacketState(int32_t sourceNodeId, int32_t targetNodeId) const;
     void SlotResetHandler();

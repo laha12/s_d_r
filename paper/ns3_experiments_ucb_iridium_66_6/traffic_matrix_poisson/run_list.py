@@ -2,45 +2,57 @@ from pathlib import Path
 import random
 
 
-dynamic_state_update_interval_ms = 100
-simulation_end_time_s = 5
-enable_isl_utilization_tracking = False
+dynamic_state_update_interval_ms = 1000  # 从100ms改为1000ms(1秒)，减少90%的更新次数以避免OOM
+simulation_end_time_s = 200
+enable_isl_utilization_tracking = True
 satellite_network_force_static = False
 isl_utilization_tracking_interval_ns = 1 * 100 * 1000 * 1000
 
 dynamic_state_update_interval_ns = dynamic_state_update_interval_ms * 1000 * 1000
 simulation_end_time_ns = simulation_end_time_s * 1000 * 1000 * 1000
-satellite_network_ucb = "iridium_789_66_6_isls_plus_grid_ground_stations_top_100_algorithm_ucb_distributed_routing"
-satellite_network_bfs = "iridium_789_66_6_isls_plus_grid_ground_stations_top_100_algorithm_free_one_only_over_isls"
+satellite_network_ucb = "iridium_789_66_6_isls_plus_grid_ground_stations_top_10_algorithm_ucb_distributed_routing"
+satellite_network_bfs = "iridium_789_66_6_isls_plus_grid_ground_stations_top_10_algorithm_free_one_only_over_isls"
 
-traffic_generation_rates_mbps = [0.01,0.03,0.05,0.08]
+traffic_generation_rates_mbps = [0.1,0.3,0.5,0.8,1,1.2,1.4,1.6,1.8,2.0]
 traffic_slot_len_ns = dynamic_state_update_interval_ns
-tcp_flow_size_byte = 100000
+tcp_flow_size_byte = 500000
 traffic_seed = 123456789
 pairing_seed = 987654321
-
+min_flow_interval_ns = 200000000
+queue_size_pkt = 200
+data_rate_megabit_per_s = 10.0
 ucb_max_hop_count = 64
-ucb_slot_duration_s = 0.1
-ucb_reward_weights = "list(0.2,0.2,0.2,0.4)"
+ucb_slot_duration_s = 1
+ucb_reward_weights = "list(0.2,0.4,0.4)"
 ucb_epsilon1 = "1e-9"
 ucb_epsilon2 = "1e-9"
 ucb_random_select_prob = "0.0"
 ucb_dst_arrival_reward = "1.0"
+ucb_queue_drop_threshold = queue_size_pkt
+ucb_reference_delay_ms = "100.0"
+ucb_reference_distance_m = "10000000.0"
+ucb_slot_decay_factor = "0.5"
 
 routing_algorithms = [
+    # {
+    #     "label": "ucb",
+    #     "satellite_network": satellite_network_ucb,
+    #     "satellite_network_routing": "ucb_distributed",
+    #     "tcp_socket_type": "TcpNewReno",
+    # },
     {
         "label": "ucb",
         "satellite_network": satellite_network_ucb,
         "satellite_network_routing": "ucb_distributed",
-        "tcp_socket_type": "TcpNewReno",
+        "tcp_socket_type": "TcpHybla",
     },
-    {
-        "label": "bfs",
-        "satellite_network": satellite_network_bfs,
-        # main_satnet.cc default path: ArbiterSingleForwardHelper (forwarding table)
-        "satellite_network_routing": "single_forward",
-        "tcp_socket_type": "TcpNewReno",
-    },
+    # {
+    #     "label": "bfs",
+    #     "satellite_network": satellite_network_bfs,
+    #     # main_satnet.cc default path: ArbiterSingleForwardHelper (forwarding table)
+    #     "satellite_network_routing": "single_forward",
+    #     "tcp_socket_type": "TcpNewReno",
+    # },
 ]
 
 
@@ -123,8 +135,8 @@ def get_tcp_run_list():
                     "dynamic_state_update_interval_ns": dynamic_state_update_interval_ns,
                     "simulation_end_time_ns": simulation_end_time_ns,
                     "satellite_network_force_static": satellite_network_force_static,
-                    "data_rate_megabit_per_s": 10.0,
-                    "queue_size_pkt": 100,
+                    "data_rate_megabit_per_s": data_rate_megabit_per_s,
+                    "queue_size_pkt": queue_size_pkt,
                     "enable_isl_utilization_tracking": enable_isl_utilization_tracking,
                     "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
                     "ucb_max_hop_count": ucb_max_hop_count,
@@ -134,6 +146,10 @@ def get_tcp_run_list():
                     "ucb_epsilon2": ucb_epsilon2,
                     "ucb_random_select_prob": ucb_random_select_prob,
                     "ucb_dst_arrival_reward": ucb_dst_arrival_reward,
+                    "ucb_queue_drop_threshold": ucb_queue_drop_threshold,
+                    "ucb_reference_delay_ms": ucb_reference_delay_ms,
+                    "ucb_reference_distance_m": ucb_reference_distance_m,
+                    "ucb_slot_decay_factor": ucb_slot_decay_factor,
                     "max_gsl_length_m": description_values["max_gsl_length_m"],
                     "max_isl_length_m": description_values["max_isl_length_m"],
                     "traffic_generation_rate_mbps": rate_mbps,
@@ -141,6 +157,7 @@ def get_tcp_run_list():
                     "tcp_flow_size_byte": tcp_flow_size_byte,
                     "traffic_seed": traffic_seed,
                     "traffic_pairs": traffic_pairs,
+                    "min_flow_interval_ns": min_flow_interval_ns,
                 }
             )
     return run_list

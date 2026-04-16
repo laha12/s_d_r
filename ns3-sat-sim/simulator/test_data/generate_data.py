@@ -81,7 +81,7 @@ def generate(
     if traffic_start_ns < 0:
         raise ValueError("traffic_start_ns 不能为负数")
     if traffic_end_ns is None:
-        traffic_end_ns = sim_end_ns
+        traffic_end_ns = int(sim_end_ns * 0.7)
     if traffic_end_ns <= traffic_start_ns:
         raise ValueError("traffic_end_ns 必须大于 traffic_start_ns")
     if traffic_start_ns >= sim_end_ns:
@@ -163,6 +163,7 @@ def generate_tcp_flow_schedule(
     traffic_end_ns=None,
     pair_start_times=None,
     pair_end_times=None,
+    min_flow_interval_ns=0,
     seed=1,
     print_samples=False,
 ):
@@ -183,7 +184,7 @@ def generate_tcp_flow_schedule(
     if traffic_start_ns < 0:
         raise ValueError("traffic_start_ns 不能为负数")
     if traffic_end_ns is None:
-        traffic_end_ns = sim_end_ns
+        traffic_end_ns = int(sim_end_ns * 0.85)
     if traffic_end_ns <= traffic_start_ns:
         raise ValueError("traffic_end_ns 必须大于 traffic_start_ns")
     if traffic_start_ns >= sim_end_ns:
@@ -194,6 +195,8 @@ def generate_tcp_flow_schedule(
         pair_end_times = {}
     if not node_pairs:
         raise ValueError("至少需要一个源-目的节点对")
+    if min_flow_interval_ns < 0:
+        raise ValueError("min_flow_interval_ns 不能为负数")
 
     pair_windows = {}
     for src_id, dst_id in node_pairs:
@@ -263,6 +266,24 @@ def generate_tcp_flow_schedule(
 
     events.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
 
+    if min_flow_interval_ns > 0:
+        pair_last_start = {}
+        filtered_events = []
+        for event in events:
+            start_time_ns, src_id, dst_id, metadata = event
+            pair_key = (src_id, dst_id)
+            effective_start_ns, effective_end_ns = pair_windows[pair_key]
+            if pair_key in pair_last_start:
+                earliest_start = pair_last_start[pair_key] + min_flow_interval_ns
+                if start_time_ns < earliest_start:
+                    start_time_ns = earliest_start
+            if start_time_ns >= effective_end_ns:
+                continue
+            pair_last_start[pair_key] = start_time_ns
+            filtered_events.append((start_time_ns, src_id, dst_id, metadata))
+        events = filtered_events
+        events.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+
     with open(out_csv_path, "w", encoding="utf-8") as f:
         for flow_id, event in enumerate(events):
             start_time_ns, src_id, dst_id, metadata = event
@@ -303,6 +324,7 @@ def build_arg_parser():
     parser.add_argument("--packet-lambda-per-s", type=float, default=None)
     parser.add_argument("--flow-size-byte", type=int, default=1000000)
     parser.add_argument("--packet-size-byte", type=int, default=1500)
+    parser.add_argument("--min-flow-interval-ns", type=int, default=0, help="同一节点对相邻流的最小启动间隔(ns)")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--print-samples", action="store_true")
     return parser
@@ -344,6 +366,7 @@ if __name__ == "__main__":
             traffic_end_ns=args.traffic_end_ns,
             pair_start_times=pair_start_times,
             pair_end_times=pair_end_times,
+            min_flow_interval_ns=args.min_flow_interval_ns,
             seed=args.seed,
             print_samples=args.print_samples,
         )

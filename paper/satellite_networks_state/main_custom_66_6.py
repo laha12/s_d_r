@@ -45,8 +45,9 @@ MEAN_MOTION_REV_PER_DAY = 14.34
 INCLINATION_DEGREE = 86.4
 
 # Considering an elevation angle of 25 degrees for GSL visibility.
-SATELLITE_CONE_RADIUS_M = ALTITUDE_M / math.tan(math.radians(25.0))
-MAX_GSL_LENGTH_M = math.sqrt(math.pow(SATELLITE_CONE_RADIUS_M, 2) + math.pow(ALTITUDE_M, 2))
+# SATELLITE_CONE_RADIUS_M = ALTITUDE_M / math.tan(math.radians(25.0))
+# MAX_GSL_LENGTH_M = math.sqrt(math.pow(SATELLITE_CONE_RADIUS_M, 2) + math.pow(ALTITUDE_M, 2))
+MAX_GSL_LENGTH_M = 2500000.0
 
 # For 6-orbit Iridium-like constellation with 60 deg RAAN spacing,
 # cross-orbit ISL distances can reach ~14270 km at t=0.
@@ -79,7 +80,7 @@ def main():
         print(
             "Usage: python main_custom_66_6.py [duration (s)] [time step (ms)] "
             "[isls_plus_grid / isls_none] "
-            "[ground_stations_{top_100, paris_moscow_grid}] "
+            "[ground_stations_{top_100, paris_moscow_grid, top_20，top_10}] "
             "[algorithm_{free_one_only_over_isls, free_one_only_gs_relays, paired_many_only_over_isls}] "
             "[num threads]"
         )
