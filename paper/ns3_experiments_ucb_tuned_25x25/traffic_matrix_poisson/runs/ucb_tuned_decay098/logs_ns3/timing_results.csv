@@ -1,0 +1,11 @@
+Configure run and logs directory,139291
+Configure simulator,476823
+Setup TCP parameters,185081
+Read flow schedule,23312542835
+Remove previous flow log files,20150
+Setup TCP flow sinks,2638903
+Setup traffic TCP flow starter,16996
+Whatever is between previous timestamp and the simulation run,40311
+Run simulation,179601142284
+Write TCP flow log files,1165992
+Destroy simulator,219784872
