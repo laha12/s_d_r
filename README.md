@@ -83,8 +83,11 @@ R(neighbor) = w1 * delay_reward + w2 * load_balance_reward + w3 * distance_rewar
 
 | 机制 | 说明 |
 | :--- | :--- |
-| **时间槽衰减** | 每个时间槽结束时，UCB状态按 `decay_factor` 衰减（默认0.5），使算法快速适应拓扑变化 |
+| **时间槽衰减** | 每个时间槽结束时，UCB状态（selectCount、avgReward）按 `decay_factor` 衰减，使算法适应拓扑变化 |
+| **Top-K候选集** | 按距离筛选UCB可选邻居，限制搜索空间至Top-K个最近邻居（默认K=4） |
+| **路径缓存** | 缓存已验证成功的路径，以概率 `path_cache_prefer_prob` 复用，保障TCP业务连续性 |
 | **随机探索** | 以概率 `random_select_prob` 随机选择邻居，保证探索能力 |
+| **数据包状态TTL** | 全局数据包状态表定时清理（每TTL个slot过期），防止内存无限增长 |
 | **跳数限制** | 超过 `max_hop_count`（默认64跳）的数据包被丢弃 |
 | **队列丢包** | 队列长度超过阈值时丢弃数据包，防止拥塞扩散 |
 | **路径历史追踪** | 每个数据包携带已访问节点列表，避免环路 |
@@ -99,6 +102,19 @@ R(neighbor) = w1 * delay_reward + w2 * load_balance_reward + w3 * distance_rewar
 
 ---
 
+## 对比基线算法
+
+### SPF动态最短路径
+
+为公平评估UCB性能，实现了基于实际设备拓扑的Dijkstra最短路径基线算法（`arbiter-spf-dynamic`），以物理距离为权重。与UCB的关键区别：SPF拥有全局拓扑视图，UCB仅基于本地邻居信息做分布式决策。
+
+实现过程中修复了三个关键Bug：
+1. **距离→设备拓扑**：Dijkstra使用距离判断邻居连通性，在max_isl_length_m很大的场景下形成完全图。修复为从实际设备/通道枚举邻居。
+2. **GS-to-GS环路**：GSL共享信道导致地面站间"直接连通"。修复为过滤GS-to-GS边。
+3. **GSL卫星互连**：GSL共享介质使卫星间也通过GSL"直接连通"。修复为GSL设备仅添加跨类型邻居（sat↔gs）。
+
+---
+
 ## 实验场景
 
 ### 场景一：25x25均匀网格星座
@@ -110,8 +126,6 @@ R(neighbor) = w1 * delay_reward + w2 * load_balance_reward + w3 * distance_rewar
 | 仿真时长 | 点对点: 2s / 流量矩阵: 50s |
 | ISL数据率 | 10 Mbps |
 | 队列大小 | 100 packets |
-| UCB时间槽 | 0.1s |
-| 探索概率 | 0.1 |
 | TCP类型 | TcpVegas |
 | 动态状态 | 静态（force_static=True） |
 
@@ -126,14 +140,8 @@ R(neighbor) = w1 * delay_reward + w2 * load_balance_reward + w3 * distance_rewar
 | 仿真时长 | 点对点: 10s / 流量矩阵: 200s |
 | ISL数据率 | 10 Mbps |
 | 队列大小 | 200 packets |
-| UCB时间槽 | 1.0s |
-| 探索概率 | 0.0 |
 | TCP类型 | TcpHybla |
 | 动态状态 | 动态（force_static=False） |
-| 奖励权重 | [0.2, 0.4, 0.4] |
-| 参考时延 | 100 ms |
-| 参考距离 | 10,000 km |
-| 衰减因子 | 0.5 |
 
 ### 实验类型
 
@@ -149,11 +157,35 @@ R(neighbor) = w1 * delay_reward + w2 * load_balance_reward + w3 * distance_rewar
 
 ---
 
+## 实验结果摘要
+
+### 25x25流量矩阵（278条泊松流，0.005 Mbps/流，50秒模拟）
+
+| 配置 | decay | 完成率 | 完成流数 | 仿真墙钟 |
+| :--- | :--- | :--- | :--- | :--- |
+| **SPF动态基线** | N/A | **100%** | 278/278 | 3112s |
+| UCB改进基线 (Top-K+Cache) | 0.5 | 14.7% | 41/278 | 1723s |
+| UCB保守调优 (方案A) | 0.98 | 22.7% | 63/278 | 180s |
+| UCB激进调优 (方案B) | 0.99 | 24.5% | 68/278 | 179s |
+
+### 关键发现
+
+1. **decay_factor是最关键参数**：从0.5调到0.98后，完成率+57.6%，仿真速度10x加速。decay=0.5导致selectCount每slot减半，3个slot后仅剩12.5%，UCB永远不收敛。
+2. **UCB vs SPF仍有4倍差距**（24.5% vs 100%）：UCB完全分布式无全局拓扑信息，50秒学习时间不足。
+3. **奖励权重Bug**：配置4个权重但代码只使用前3个，第4个被忽略。详见 `UCB_PARAMETER_TUNING_REPORT.md`。
+
+> 详细参数调优分析和文献依据见 [UCB_PARAMETER_TUNING_REPORT.md](UCB_PARAMETER_TUNING_REPORT.md)
+> 完整实验报告见 [EXPERIMENT_REPORT_V2.md](EXPERIMENT_REPORT_V2.md)
+
+---
+
 ## 项目结构
 
 ```
 s_d_r/
 ├── README.md                           # 本文档
+├── EXPERIMENT_REPORT_V2.md             # 实验报告（SPF基线+UCB改进）
+├── UCB_PARAMETER_TUNING_REPORT.md      # UCB参数调优研究报告
 ├── hypatia_install_dependencies.sh     # 依赖安装脚本
 ├── hypatia_build.sh                    # 构建脚本
 ├── hypatia_run_tests.sh                # 测试脚本
@@ -174,28 +206,21 @@ s_d_r/
 │       ├── contrib/satellite-network/  # 卫星网络ns-3模块
 │       │   └── model/
 │       │       ├── arbiter-ucb-distributed-routing.h  # UCB路由头文件
-│       │       └── arbiter-ucb-distributed-routing.cc  # UCB路由实现
+│       │       ├── arbiter-ucb-distributed-routing.cc  # UCB路由实现
+│       │       ├── arbiter-spf-dynamic.h              # SPF动态基线头文件
+│       │       └── arbiter-spf-dynamic.cc              # SPF动态基线实现
 │       └── scratch/
 │           └── main_satnet.cc          # 仿真入口
 │
 ├── paper/                              # 实验脚本
 │   ├── satellite_networks_state/       # 星座状态生成脚本
-│   ├── ns3_experiments_ucb_25x25/      # 25x25网格UCB实验
-│   │   ├── a_2_b/                      # 点对点测试
-│   │   │   ├── step_0_generate_topology.py
-│   │   │   ├── step_1_generate_runs.py
-│   │   │   ├── step_2_run.py
-│   │   │   └── step_3_generate_plots.py
-│   │   ├── traffic_matrix_poisson/     # 流量矩阵测试
-│   │   │   ├── step_0_generate_topology.py
-│   │   │   ├── step_1_generate_runs.py
-│   │   │   ├── step_2_run.py
-│   │   │   └── step_3_generate_plots.py
-│   │   └── group_ucb_log_by_uid.py    # UCB日志分组分析
-│   ├── ns3_experiments_ucb_iridium_66_6/  # 铱星UCB实验
-│   │   ├── a_2_b/
-│   │   ├── traffic_matrix_poisson/
-│   │   └── group_ucb_log_by_uid.py
+│   ├── ns3_experiments_spf_25x25/      # 25x25网格SPF基线实验
+│   ├── ns3_experiments_spf_iridium_66_6/  # 铱星SPF基线实验
+│   ├── ns3_experiments_ucb_25x25/      # 25x25网格UCB基础实验
+│   ├── ns3_experiments_ucb_improved_25x25/     # 25x25 UCB改进(Top-K+Cache)实验
+│   ├── ns3_experiments_ucb_improved_iridium_66_6/  # 铱星UCB改进实验
+│   ├── ns3_experiments_ucb_tuned_25x25/        # 25x25 UCB参数调优实验
+│   ├── ns3_experiments_ucb_iridium_66_6/       # 铱星UCB基础实验
 │   ├── figures/                        # 绘图脚本
 │   └── satviz_plots/                   # 可视化绘图
 │
@@ -264,17 +289,31 @@ python step_3_generate_plots.py
 
 ## UCB算法参数配置
 
-| 参数 | 说明 | 25x25默认值 | 铱星默认值 |
-| :--- | :--- | :--- | :--- |
-| `ucb_max_hop_count` | 最大跳数 | 64 | 64 |
-| `ucb_slot_duration_s` | UCB时间槽(s) | 0.1 | 1.0 |
-| `ucb_reward_weights` | 奖励权重 [w1,w2,w3] | [0.2,0.2,0.2,0.4] | [0.2,0.4,0.4] |
-| `ucb_random_select_prob` | 随机探索概率 | 0.1 | 0.0 |
-| `ucb_dst_arrival_reward` | 到达目的地奖励 | 1.0 | 1.0 |
-| `ucb_reference_delay_ms` | 参考时延(ms) | - | 100.0 |
-| `ucb_reference_distance_m` | 参考距离(m) | - | 10,000,000 |
-| `ucb_slot_decay_factor` | 时间槽衰减因子 | - | 0.5 |
-| `ucb_queue_drop_threshold` | 队列丢包阈值 | - | 200 |
+| 参数 | 说明 | 代码默认值 |
+| :--- | :--- | :--- |
+| `ucb_max_hop_count` | 最大跳数 | 30 |
+| `ucb_slot_duration_s` | UCB时间槽(s) | 1.0 |
+| `ucb_reward_weights` | 奖励权重 [w1,w2,w3]（时延,负载均衡,距离） | [0.333,0.333,0.334] |
+| `ucb_epsilon1` / `ucb_epsilon2` | UCB探索参数 | 1e-9 |
+| `ucb_random_select_prob` | 随机探索概率 | 0.1 |
+| `ucb_dst_arrival_reward` | 到达目的地奖励 | 2.0 |
+| `ucb_reference_delay_ms` | 参考时延(ms) | 100.0 |
+| `ucb_reference_distance_m` | 参考距离(m) | 10,000,000 |
+| `ucb_slot_decay_factor` | 时间槽衰减因子 | 0.5 |
+| `ucb_top_k` | Top-K候选集大小（0=不过滤） | 4 |
+| `ucb_packet_state_ttl_slots` | 数据包状态TTL(slot数) | 10 |
+| `ucb_path_cache_enabled` | 是否启用路径缓存 | true |
+| `ucb_path_cache_prefer_prob` | 路径缓存复用概率 | 0.7 |
+| `ucb_queue_drop_threshold` | 队列丢包阈值 | 100 |
+
+> **调优建议**：`ucb_slot_decay_factor` 是影响性能最关键的参数。代码默认值0.5导致UCB永远不收敛，建议设为0.95-0.99。详见 [UCB_PARAMETER_TUNING_REPORT.md](UCB_PARAMETER_TUNING_REPORT.md)。
+
+## SPF基线算法参数配置
+
+| 参数 | 说明 | 代码默认值 |
+| :--- | :--- | :--- |
+| `satellite_network_routing` | 路由模式 | 设为 `spf_dynamic` 启用 |
+| `ucb_slot_duration_s` | 时槽长度（SPF复用此参数做缓存刷新） | 1.0 |
 
 ---
 
@@ -287,10 +326,15 @@ python step_3_generate_plots.py
 - [x] 奖励函数设计（时延 + 负载均衡 + 距离）
 - [x] 点对点连通性测试
 - [x] 泊松流量矩阵测试
-- [ ] 与最短路径路由(BFS)的对比实验
+- [x] 实现SPF动态基线算法（含设备拓扑/GSL环路修复）
+- [x] UCB内存崩溃修复（TTL清理 + 计数器uint64扩容）
+- [x] Top-K候选集 + 路径缓存改进
+- [x] 与最短路径路由(SPF)的对比实验
+- [x] UCB参数调优研究（文献调研 + 实验验证）
+- [ ] Iridium铱星场景SIGSEGV修复
 - [ ] 不同星座规模的泛化性测试
 - [ ] 奖励函数权重敏感性分析
-- [ ] 探索-利用策略调优
+- [ ] 探索-利用策略调优（更长仿真时间验证收敛）
 - [ ] 撰写研究报告
 
 ---
