@@ -25,7 +25,7 @@ const size_t kUcbRouteDebugMaxArmsToPrint = 32;
 uint64_t g_ucb_route_debug_line_count = 0;
 std::ofstream g_ucb_route_debug_file;
 bool g_ucb_route_debug_file_initialized = false;
-uint32_t g_ucb_packet_instance_counter = 1;
+uint64_t g_ucb_packet_instance_counter = 1;
 std::map<uint64_t, UcbPacketState> g_ucb_packet_state_by_uid;
 
 std::string VectorToString(const std::vector<uint32_t>& vec) {
@@ -169,7 +169,11 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
     uint32_t queueDropThreshold,
     double referenceDelayMs,
     double referenceDistanceM,
-    double slotDecayFactor
+    double slotDecayFactor,
+    uint32_t topK,
+    uint32_t packetStateTtlSlots,
+    bool pathCacheEnabled,
+    double pathCachePreferProb
 ) : ArbiterSatnet(this_Node, nodes) {
     m_node_id = this_Node->GetId();
     m_maxHopCount = maxHopCount;
@@ -211,6 +215,14 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
         "ucb_random_select_prob must be in [0, 1]"
     );
     m_randomVariable = CreateObject<UniformRandomVariable>();
+    // Top-K candidate set
+    m_topK = topK;
+    // Memory fix: TTL
+    m_packetStateTtlSlots = packetStateTtlSlots;
+    m_packetStateMaxAgeNs = static_cast<uint64_t>(packetStateTtlSlots) * static_cast<uint64_t>(slotDurationS * 1e9);
+    // Path cache
+    m_pathCacheEnabled = pathCacheEnabled;
+    m_pathCachePreferProb = pathCachePreferProb;
     m_currentSlot = 0;
     m_totalForwardCount = 0;
     m_totalDropCount = 0;
@@ -339,6 +351,7 @@ UcbPacketState ArbiterUcbDistributedRouting::InitPacketState(int32_t sourceNodeI
     state.hopCount = 0;
     state.pathHistory.clear();
     state.pathHistory.push_back(static_cast<uint32_t>(sourceNodeId));
+    state.creationTimeNs = Simulator::Now().GetNanoSeconds();
     if (static_cast<uint32_t>(m_node_id) != static_cast<uint32_t>(sourceNodeId)) {
         state.pathHistory.push_back(static_cast<uint32_t>(m_node_id));
     }
@@ -358,7 +371,40 @@ void ArbiterUcbDistributedRouting::SlotResetHandler()
         }
         ucbState.avgReward = ucbState.avgReward * m_slot_decay_factor;
     }
+
+    // Memory fix: cleanup stale packet states (only first node per slot)
+    CleanupStalePacketStates();
+
+    // Path cache maintenance
+    if (m_pathCacheEnabled) {
+        for (auto it = m_cachedPaths.begin(); it != m_cachedPaths.end(); ) {
+            it->second.confidence *= m_slot_decay_factor;
+            if (m_currentSlot - it->second.lastUsedSlot > 10 || it->second.confidence < 0.01) {
+                it = m_cachedPaths.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     Simulator::Schedule(Seconds(m_slotDurationS), &ArbiterUcbDistributedRouting::SlotResetHandler, this);
+}
+
+void ArbiterUcbDistributedRouting::CleanupStalePacketStates()
+{
+    static uint32_t g_last_cleanup_slot = 0;
+    if (m_currentSlot == g_last_cleanup_slot) {
+        return;  // Already cleaned up this slot by another node instance
+    }
+    g_last_cleanup_slot = m_currentSlot;
+    uint64_t nowNs = Simulator::Now().GetNanoSeconds();
+    for (auto it = g_ucb_packet_state_by_uid.begin(); it != g_ucb_packet_state_by_uid.end(); ) {
+        if (nowNs - it->second.creationTimeNs > m_packetStateMaxAgeNs) {
+            it = g_ucb_packet_state_by_uid.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void ArbiterUcbDistributedRouting::ResetSlotDynamicState() {
@@ -465,6 +511,15 @@ std::vector<uint32_t> ArbiterUcbDistributedRouting::GetValidArms(
     }
 
     if (!strictCandidates.empty()) {
+        // Top-K filtering by distance to destination
+        if (m_topK > 0 && strictCandidates.size() > m_topK) {
+            std::sort(strictCandidates.begin(), strictCandidates.end(),
+                [this, targetNodeId](uint32_t a, uint32_t b) {
+                    return CalculateDistanceToDestination(a, targetNodeId)
+                         < CalculateDistanceToDestination(b, targetNodeId);
+                });
+            strictCandidates.resize(m_topK);
+        }
         return strictCandidates;
     }
 
@@ -477,6 +532,15 @@ std::vector<uint32_t> ArbiterUcbDistributedRouting::GetValidArms(
     }
 
     if (!fallbackNonGround.empty()) {
+        // Top-K filtering by distance to destination
+        if (m_topK > 0 && fallbackNonGround.size() > m_topK) {
+            std::sort(fallbackNonGround.begin(), fallbackNonGround.end(),
+                [this, targetNodeId](uint32_t a, uint32_t b) {
+                    return CalculateDistanceToDestination(a, targetNodeId)
+                         < CalculateDistanceToDestination(b, targetNodeId);
+                });
+            fallbackNonGround.resize(m_topK);
+        }
         return fallbackNonGround;
     }
 
@@ -671,6 +735,19 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
 
     uint32_t selectedNeighborId = validArms[0];
 
+    // Path cache lookup for business continuity
+    if (m_pathCacheEnabled && !isDryRun) {
+        auto cacheIt = m_cachedPaths.find(static_cast<uint32_t>(targetNodeId));
+        if (cacheIt != m_cachedPaths.end()) {
+            uint32_t cachedNextHop = cacheIt->second.nextHopNodeId;
+            bool cachedHopValid = std::find(validArms.begin(), validArms.end(), cachedNextHop) != validArms.end();
+            if (cachedHopValid && m_randomVariable->GetValue(0.0, 1.0) < m_pathCachePreferProb) {
+                selectedNeighborId = cachedNextHop;
+                cacheIt->second.lastUsedSlot = m_currentSlot;
+            }
+        }
+    }
+
     bool randomSelect = false;
     if (validArms.size() > 1 && m_randomVariable->GetValue(0.0, 1.0) < m_random_select_prob) {
         randomSelect = true;
@@ -758,6 +835,14 @@ std::tuple<int32_t, int32_t, int32_t> ArbiterUcbDistributedRouting::TopologySate
         UpdateLinkState(selectedNeighborId, packetSizeByte);
         double reward = CalculateReward(selectedNeighborId, static_cast<uint32_t>(targetNodeId), validArms, true);
         UpdateUcbState(selectedNeighborId, reward);
+        // Update path cache
+        if (m_pathCacheEnabled) {
+            m_cachedPaths[static_cast<uint32_t>(targetNodeId)] = CachedPath{
+                selectedNeighborId,
+                m_currentSlot,
+                1.0
+            };
+        }
         std::ostringstream oss;
         oss << "[UCB_DEBUG][LEARN]"
             << " node=" << m_node_id

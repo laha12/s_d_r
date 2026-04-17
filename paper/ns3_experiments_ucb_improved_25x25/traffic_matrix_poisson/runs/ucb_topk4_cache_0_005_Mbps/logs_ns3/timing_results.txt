@@ -1,0 +1,11 @@
+[    0.0 -     0.0] (0.0 s) :: Configure run and logs directory
+[    0.0 -     0.0] (0.0 s) :: Configure simulator
+[    0.0 -     0.0] (0.0 s) :: Setup TCP parameters
+[    0.0 -    25.0] (25.0 s) :: Read flow schedule
+[   25.0 -    25.0] (0.0 s) :: Remove previous flow log files
+[   25.0 -    25.1] (0.0 s) :: Setup TCP flow sinks
+[   25.1 -    25.1] (0.0 s) :: Setup traffic TCP flow starter
+[   25.1 -    25.1] (0.0 s) :: Whatever is between previous timestamp and the simulation run
+[   25.1 -  1747.7] (1722.6 s) :: Run simulation
+[ 1747.7 -  1747.7] (0.0 s) :: Write TCP flow log files
+[ 1747.7 -  1747.9] (0.2 s) :: Destroy simulator

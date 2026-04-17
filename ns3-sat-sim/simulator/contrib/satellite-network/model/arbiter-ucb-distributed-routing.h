@@ -23,7 +23,7 @@ public:
     void Deserialize(TagBuffer i) override;
     void Print(std::ostream &os) const override;
 
-    uint32_t instanceId = 0;
+    uint64_t instanceId = 0;
     uint32_t srcNodeId = 0;
     uint32_t dstNodeId = 0;
     std::vector<uint32_t> pathHistory;
@@ -36,6 +36,14 @@ struct UcbPacketState {
     uint32_t dstNodeId;
     uint32_t hopCount;
     std::vector<uint32_t> pathHistory;
+    uint64_t creationTimeNs;  // Memory fix: TTL tracking
+};
+
+// Path cache for business continuity
+struct CachedPath {
+    uint32_t nextHopNodeId;
+    uint64_t lastUsedSlot;
+    double confidence;
 };
 
 class ArbiterUcbDistributedRouting : public ArbiterSatnet {
@@ -57,7 +65,11 @@ public:
         uint32_t queueDropThreshold,
         double referenceDelayMs,
         double referenceDistanceM,
-        double slotDecayFactor
+        double slotDecayFactor,
+        uint32_t topK,
+        uint32_t packetStateTtlSlots,
+        bool pathCacheEnabled,
+        double pathCachePreferProb
     );
     ~ArbiterUcbDistributedRouting() override;
 
@@ -115,10 +127,24 @@ private:
     double m_reference_distance_m;
     double m_slot_decay_factor;
     Ptr<UniformRandomVariable> m_randomVariable;
+
+    // Top-K candidate set
+    uint32_t m_topK;
+
+    // Memory fix: TTL for packet state
+    uint32_t m_packetStateTtlSlots;
+    uint64_t m_packetStateMaxAgeNs;
+
+    // Path cache for business continuity
+    bool m_pathCacheEnabled;
+    double m_pathCachePreferProb;
+    std::map<uint32_t, CachedPath> m_cachedPaths;
+
     UcbPacketState InitPacketState(int32_t sourceNodeId, int32_t targetNodeId) const;
     void SlotResetHandler();
     void ResetSlotDynamicState();
     void RefreshLinkAvailability();
+    void CleanupStalePacketStates();
     std::vector<uint32_t> GetValidArms(uint32_t targetNodeId, const UcbPacketState &packetState) const;
     double CalculateUcbWeight(uint32_t neighborId, uint32_t totalForwardCount);
     double CalculateReward(

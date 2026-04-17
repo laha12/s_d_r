@@ -38,6 +38,7 @@
 #include "ns3/tcp-optimizer.h"
 #include "ns3/arbiter-single-forward-helper.h"
 #include "../../contrib/satellite-network/model/arbiter-ucb-distributed-routing.h"
+#include "../../contrib/satellite-network/model/arbiter-spf-dynamic.h"
 #include "ns3/ipv4-arbiter-routing-helper.h"
 #include "ns3/gsl-if-bandwidth-helper.h"
 #include "ns3/exp-util.h"
@@ -125,6 +126,18 @@ int main(int argc, char *argv[]) {
             basicSimulation->GetConfigParamOrDefault("dynamic_state_update_interval_ns", "100000000")
         );
         (void) dynamic_state_update_interval_ns;
+
+        uint32_t top_k = (uint32_t) parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("ucb_top_k", "4")
+        );
+        uint32_t packet_state_ttl_slots = (uint32_t) parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("ucb_packet_state_ttl_slots", "10")
+        );
+        bool path_cache_enabled = basicSimulation->GetConfigParamOrDefault("ucb_path_cache_enabled", "true") == "true";
+        double path_cache_prefer_prob = parse_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_path_cache_prefer_prob", "0.7")
+        );
+
         // 每个节点绑定一个ucb
         for (size_t i = 0; i < topology->GetNodes().GetN(); i++) {
             Ptr<ArbiterUcbDistributedRouting> arbiter = CreateObject<ArbiterUcbDistributedRouting>(
@@ -142,7 +155,38 @@ int main(int argc, char *argv[]) {
                 queue_drop_threshold,
                 reference_delay_ms,
                 reference_distance_m,
-                slot_decay_factor
+                slot_decay_factor,
+                top_k,
+                packet_state_ttl_slots,
+                path_cache_enabled,
+                path_cache_prefer_prob
+            );
+            topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
+        }
+
+    } else if (routing_mode == "spf_dynamic") {
+
+        double slot_duration_s = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_slot_duration_s", "1.0")
+        );
+        double max_gsl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_gsl_length_m", "1089686.0")
+        );
+        double max_isl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_isl_length_m", "5442958.2030362869")
+        );
+        int64_t dynamic_state_update_interval_ns = parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("dynamic_state_update_interval_ns", "100000000")
+        );
+        (void) dynamic_state_update_interval_ns;
+
+        for (size_t i = 0; i < topology->GetNodes().GetN(); i++) {
+            Ptr<ArbiterSpfDynamic> arbiter = CreateObject<ArbiterSpfDynamic>(
+                topology->GetNodes().Get(i),
+                topology->GetNodes(),
+                slot_duration_s,
+                max_gsl_length_m,
+                max_isl_length_m
             );
             topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
         }
