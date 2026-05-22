@@ -15,6 +15,8 @@ def build(bld):
         'model/arbiter-satnet.cc',
         'model/arbiter-single-forward.cc',
         'model/arbiter-ucb-distributed-routing.cc',
+        'model/arbiter-spf.cc',
+        'model/arbiter-elb.cc',
         'helper/arbiter-single-forward-helper.cc',
         'helper/gsl-if-bandwidth-helper.cc',
         ]
@@ -39,6 +41,8 @@ def build(bld):
         'model/arbiter-satnet.h',
         'model/arbiter-single-forward.h',
         'model/arbiter-ucb-distributed-routing.h',
+        'model/arbiter-spf.h',
+        'model/arbiter-elb.h',
         'helper/arbiter-single-forward-helper.h',
         'helper/gsl-if-bandwidth-helper.h',
         ]

@@ -54,6 +54,7 @@ public:
         double maxIslLengthM,
         double randomSelectProb,
         double dstArrivalReward,
+        double negativeReward,
         uint32_t queueDropThreshold,
         double referenceDelayMs,
         double referenceDistanceM,
@@ -90,6 +91,7 @@ private:
         double propagationDelayMs;
         double usedCapacityBit;
         uint32_t queueLength;
+        uint64_t queuedBytes;
         bool isIsl;
         bool isGsl;
         bool isAvailable;
@@ -104,12 +106,14 @@ private:
     std::map<uint32_t, UcbState> m_ucbStateMap;
 
     std::vector<double> m_rewardWeights;
+    double m_alpha;
     double m_epsilon1;
     double m_epsilon2;
     double m_max_gsl_length_m;
     double m_max_isl_length_m;
     double m_random_select_prob;
     double m_dst_arrival_reward;
+    double m_negative_reward;
     uint32_t m_queue_drop_threshold;
     double m_reference_delay_ms;
     double m_reference_distance_m;
@@ -129,6 +133,7 @@ private:
     ) const;
     void UpdateUcbState(uint32_t selectedNeighborId, double reward);
     void UpdateLinkState(uint32_t neighborId, uint32_t packetSizeByte);
+    double GetRealTimeQueuingDelayMs(uint32_t neighborId) const;
     bool TryGetCurrentDistanceM(uint32_t neighborId, double &distanceM) const;
     double CalculateDistanceToDestination(uint32_t neighborId, uint32_t dstNodeId) const;
     bool IsPacketDrop(uint32_t neighborId, const UcbPacketState &packetState, const Ipv4Header &ipHeader) const;

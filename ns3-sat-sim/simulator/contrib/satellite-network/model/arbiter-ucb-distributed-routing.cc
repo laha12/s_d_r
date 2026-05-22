@@ -166,6 +166,7 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
     double maxIslLengthM,
     double randomSelectProb,
     double dstArrivalReward,
+    double negativeReward,
     uint32_t queueDropThreshold,
     double referenceDelayMs,
     double referenceDistanceM,
@@ -196,12 +197,15 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
     for (size_t i = 0; i < std::min(m_rewardWeights.size(), rewardWeights.size()); i++) {
         m_rewardWeights[i] = rewardWeights[i];
     }
+    // 恒定学习率：用于应对卫星网络动态变化，保持在0.1-0.2范围内
+    m_alpha = 0.1;
     m_epsilon1 = epsilon1;
     m_epsilon2 = epsilon2;
     m_max_gsl_length_m = maxGslLengthM;
     m_max_isl_length_m = maxIslLengthM;
     m_random_select_prob = randomSelectProb;
     m_dst_arrival_reward = dstArrivalReward;
+    m_negative_reward = negativeReward;
     m_queue_drop_threshold = queueDropThreshold;
     m_reference_delay_ms = referenceDelayMs;
     m_reference_distance_m = referenceDistanceM;
@@ -266,6 +270,7 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
             linkState.maxCapacityBit = transmissionRateBps * slotDurationS;
             linkState.usedCapacityBit = 0.0;
             linkState.queueLength = 0;
+            linkState.queuedBytes = 0;
             linkState.isIsl = true;
             linkState.isGsl = false;
             linkState.isAvailable = true;
@@ -301,6 +306,7 @@ ArbiterUcbDistributedRouting::ArbiterUcbDistributedRouting(
             linkState.maxCapacityBit = transmissionRateBps * slotDurationS;
             linkState.usedCapacityBit = 0.0;
             linkState.queueLength = 0;
+            linkState.queuedBytes = 0;
             linkState.isIsl = false;
             linkState.isGsl = true;
             linkState.isAvailable = true;
@@ -350,30 +356,40 @@ void ArbiterUcbDistributedRouting::SlotResetHandler()
     m_currentSlot++;
     m_lastSlotUpdateTimeNs = Simulator::Now().GetNanoSeconds();
     ResetSlotDynamicState();
+    // 修正均值衰减逻辑：
+    // 1. 移除avgReward的衰减操作，确保期望价值不被凭空降低
+    // 2. 仅适度衰减selectCount以维持UCB探索项的活性，衰减幅度控制在0.8
     for (auto &pair : m_ucbStateMap) {
         UcbState &ucbState = pair.second;
         ucbState.selectCount = static_cast<uint32_t>(ucbState.selectCount * m_slot_decay_factor);
         if (ucbState.selectCount == 0) {
             ucbState.selectCount = 1;
         }
-        ucbState.avgReward = ucbState.avgReward * m_slot_decay_factor;
+        // 注意：不再对avgReward进行衰减，保持已学习的期望价值
     }
     Simulator::Schedule(Seconds(m_slotDurationS), &ArbiterUcbDistributedRouting::SlotResetHandler, this);
 }
 
 void ArbiterUcbDistributedRouting::ResetSlotDynamicState() {
-    const double packetSizeBit = 1500.0 * 8.0;
-    // TODO: 考虑将链路已使用容量调整一下 是否可以调整为非0
     for (auto &pair : m_linkStateMap) {
         LinkState &linkState = pair.second;
         
-        uint32_t maxProcessablePackets = static_cast<uint32_t>(linkState.maxCapacityBit / packetSizeBit);
-        if (linkState.queueLength > maxProcessablePackets) {
-            linkState.queueLength -= maxProcessablePackets;
+        // 使用实际使用的容量来计算已发送的字节数
+        double bytesSentThisSlot = linkState.usedCapacityBit / 8.0;
+        
+        if (linkState.queuedBytes > static_cast<uint64_t>(bytesSentThisSlot)) {
+            linkState.queuedBytes -= static_cast<uint64_t>(bytesSentThisSlot);
         } else {
-            linkState.queueLength = 0;
+            linkState.queuedBytes = 0;
         }
+        
+        // 重置usedCapacityBit，准备下一个slot的统计
         linkState.usedCapacityBit = 0.0;
+        
+        uint64_t avgPacketSize = 1200;
+        linkState.queueLength = static_cast<uint32_t>(
+            linkState.queuedBytes / std::max(avgPacketSize, static_cast<uint64_t>(1))
+        );
     }
     RefreshLinkAvailability();
 }
@@ -486,7 +502,7 @@ std::vector<uint32_t> ArbiterUcbDistributedRouting::GetValidArms(
 double ArbiterUcbDistributedRouting::CalculateUcbWeight(uint32_t neighborId, uint32_t totalForwardCount) {
     UcbState &ucbState = m_ucbStateMap[neighborId];
     double explorationTerm = std::sqrt(
-        (3 * std::log(totalForwardCount + 1))
+        (3* std::log(totalForwardCount + 1))
         / (2 * ucbState.selectCount + m_epsilon1)
     );
     return ucbState.avgReward + explorationTerm;
@@ -503,7 +519,7 @@ double ArbiterUcbDistributedRouting::CalculateReward(
     }
 
     if (!transmitSuccess) {
-        return -1.0;
+        return m_negative_reward;
     }
     
     const LinkState &linkState = m_linkStateMap.at(neighborId);
@@ -518,7 +534,7 @@ double ArbiterUcbDistributedRouting::CalculateReward(
         "neighborId must be one of candidateArms when calculating reward."
     );
 
-    double queuingDelayMs = (linkState.queueLength * 1500.0 * 8.0) / std::max(linkState.transmissionRateBps, m_epsilon2) * 1000.0;
+    double queuingDelayMs = GetRealTimeQueuingDelayMs(neighborId);
     double totalDelayMs = linkState.propagationDelayMs + queuingDelayMs;
     double delayReward = std::exp(-totalDelayMs / std::max(m_reference_delay_ms, m_epsilon2));
 
@@ -536,7 +552,20 @@ double ArbiterUcbDistributedRouting::CalculateReward(
 void ArbiterUcbDistributedRouting::UpdateUcbState(uint32_t selectedNeighborId, double reward) {
     UcbState &ucbState = m_ucbStateMap[selectedNeighborId];
     ucbState.selectCount++;
-    ucbState.avgReward = ucbState.avgReward + (1.0 / ucbState.selectCount) * (reward - ucbState.avgReward);
+    // 使用恒定学习率替代原有的1.0/selectCount，以应对卫星网络动态变化
+    // 恒定学习率确保算法能够持续适应网络状态变化，而不是逐渐停止学习
+    double learningRate = m_alpha;
+    if (reward < 0) {
+        learningRate *= 0.5;
+    }
+    ucbState.avgReward = ucbState.avgReward + learningRate * (reward - ucbState.avgReward);
+}
+
+double ArbiterUcbDistributedRouting::GetRealTimeQueuingDelayMs(uint32_t neighborId) const {
+    const LinkState &linkState = m_linkStateMap.at(neighborId);
+    double queuedBits = static_cast<double>(linkState.queuedBytes) * 8.0;
+    double queuingDelayMs = (queuedBits / std::max(linkState.transmissionRateBps, m_epsilon2)) * 1000.0;
+    return queuingDelayMs;
 }
 
 void ArbiterUcbDistributedRouting::UpdateLinkState(uint32_t neighborId, uint32_t packetSizeByte) {
@@ -544,6 +573,7 @@ void ArbiterUcbDistributedRouting::UpdateLinkState(uint32_t neighborId, uint32_t
     uint64_t packetSizeBit = static_cast<uint64_t>(packetSizeByte) * 8;
     linkState.usedCapacityBit += packetSizeBit;
     linkState.queueLength++;
+    linkState.queuedBytes += packetSizeByte;
 }
 
 bool ArbiterUcbDistributedRouting::TryGetCurrentDistanceM(uint32_t neighborId, double &distanceM) const {

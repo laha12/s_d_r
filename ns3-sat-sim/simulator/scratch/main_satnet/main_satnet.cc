@@ -38,6 +38,8 @@
 #include "ns3/tcp-optimizer.h"
 #include "ns3/arbiter-single-forward-helper.h"
 #include "../../contrib/satellite-network/model/arbiter-ucb-distributed-routing.h"
+#include "../../contrib/satellite-network/model/arbiter-spf.h"
+#include "../../contrib/satellite-network/model/arbiter-elb.h"
 #include "ns3/ipv4-arbiter-routing-helper.h"
 #include "ns3/gsl-if-bandwidth-helper.h"
 #include "ns3/exp-util.h"
@@ -100,6 +102,9 @@ int main(int argc, char *argv[]) {
         double dst_arrival_reward = parse_double(
             basicSimulation->GetConfigParamOrDefault("ucb_dst_arrival_reward", "2.0")
         );
+        double negative_reward = parse_double(
+            basicSimulation->GetConfigParamOrDefault("ucb_negative_reward", "-0.4")
+        );
         uint32_t queue_drop_threshold = (uint32_t) parse_positive_int64(
             basicSimulation->GetConfigParamOrDefault("ucb_queue_drop_threshold", "100")
         );
@@ -139,10 +144,92 @@ int main(int argc, char *argv[]) {
                 max_isl_length_m,
                 random_select_prob,
                 dst_arrival_reward,
+                negative_reward,
                 queue_drop_threshold,
                 reference_delay_ms,
                 reference_distance_m,
                 slot_decay_factor
+            );
+            topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
+        }
+
+    } else if (routing_mode == "spf") {
+
+        double max_gsl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_gsl_length_m", "1089686.0")
+        );
+        double max_isl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_isl_length_m", "5442958.2030362869")
+        );
+        int64_t dynamic_state_update_interval_ns = parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("dynamic_state_update_interval_ns", "1000000000")
+        );
+
+        double refresh_interval_s = dynamic_state_update_interval_ns / 1e9;
+
+        uint32_t spf_queue_drop_threshold = (uint32_t) parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("spf_queue_drop_threshold", "200")
+        );
+
+        // 每个节点绑定一个SPF路由
+        for (size_t i = 0; i < topology->GetNodes().GetN(); i++) {
+            Ptr<ArbiterSpf> arbiter = CreateObject<ArbiterSpf>(
+                topology->GetNodes().Get(i),
+                topology->GetNodes(),
+                max_gsl_length_m,
+                max_isl_length_m,
+                refresh_interval_s,
+                spf_queue_drop_threshold
+            );
+            topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
+        }
+
+    } else if (routing_mode == "elb") {
+
+        double max_gsl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_gsl_length_m", "1089686.0")
+        );
+        double max_isl_length_m = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("max_isl_length_m", "5442958.2030362869")
+        );
+        int64_t dynamic_state_update_interval_ns = parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("dynamic_state_update_interval_ns", "1000000000")
+        );
+
+        double refresh_interval_s = dynamic_state_update_interval_ns / 1e9;
+
+        uint32_t elb_queue_drop_threshold = (uint32_t) parse_positive_int64(
+            basicSimulation->GetConfigParamOrDefault("elb_queue_drop_threshold", "200")
+        );
+        double alpha_threshold = parse_double(
+            basicSimulation->GetConfigParamOrDefault("elb_alpha_threshold", "0.3")
+        );
+        double beta_threshold = parse_double(
+            basicSimulation->GetConfigParamOrDefault("elb_beta_threshold", "0.7")
+        );
+        double chi_reduction_ratio = parse_double(
+            basicSimulation->GetConfigParamOrDefault("elb_chi_reduction_ratio", "0.5")
+        );
+        double avg_packet_size = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("elb_avg_packet_size", "1200.0")
+        );
+        double recovery_time_s = parse_positive_double(
+            basicSimulation->GetConfigParamOrDefault("elb_recovery_time_s", "0.1")
+        );
+
+        for (size_t i = 0; i < topology->GetNodes().GetN(); i++) {
+            Ptr<ArbiterElb> arbiter = CreateObject<ArbiterElb>(
+                topology->GetNodes().Get(i),
+                topology->GetNodes(),
+                max_gsl_length_m,
+                max_isl_length_m,
+                refresh_interval_s,
+                elb_queue_drop_threshold,
+                alpha_threshold,
+                beta_threshold,
+                chi_reduction_ratio,
+                avg_packet_size,
+                recovery_time_s
             );
             topology->GetNodes().Get(i)->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<Ipv4ArbiterRouting>()->SetArbiter(arbiter);
         }
